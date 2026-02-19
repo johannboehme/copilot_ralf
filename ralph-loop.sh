@@ -31,6 +31,7 @@ HEALTHCHECK_ENABLED="${RALPH_HEALTHCHECK_ENABLED:-true}"
 HEALTHCHECK_TIMEOUT="${RALPH_HEALTHCHECK_TIMEOUT:-120}"
 
 init_ralph_dir "${PROJECT_DIR}"
+init_learnings
 
 AGENTS_FILE="${PROJECT_DIR}/AGENTS.md"
 
@@ -222,6 +223,17 @@ DYNAMIC
         echo "Focus on other tasks instead. Only retry a failed task if you have a clearly different approach."
     fi
 
+    # Task simplification hint on second failure
+    local multi_fail_tasks
+    multi_fail_tasks=$(get_multi_failure_tasks 2)
+    if [[ -n "${multi_fail_tasks}" ]]; then
+        echo ""
+        echo "## IMPORTANT: Task Decomposition Required"
+        echo "These tasks have failed multiple times. Instead of retrying them as-is,"
+        echo "break each one into 2-3 smaller sub-tasks in the PRD, then complete the first sub-task:"
+        echo "${multi_fail_tasks}"
+    fi
+
     # Adaptive stagnation hints
     if [[ "${stagnant_count}" -ge 1 ]]; then
         echo ""
@@ -262,6 +274,27 @@ DYNAMIC
         echo ""
         echo "## Recent Progress"
         echo "${progress_summary}"
+    fi
+
+    # Learnings from previous tasks
+    local learnings
+    learnings=$(get_learnings)
+    if [[ -n "${learnings}" ]]; then
+        echo ""
+        echo "## Learnings from Previous Tasks"
+        echo "Patterns discovered during this session:"
+        echo "${learnings}"
+    fi
+
+    # Recent file changes (repo context)
+    local recent_diff_stat
+    recent_diff_stat=$(git diff --stat HEAD~1 HEAD 2>/dev/null | tail -10 || true)
+    if [[ -n "${recent_diff_stat}" ]]; then
+        echo ""
+        echo "## Recently Changed Files"
+        echo '```'
+        echo "${recent_diff_stat}"
+        echo '```'
     fi
 }
 
@@ -504,6 +537,17 @@ $(build_dynamic_prompt "${iteration}" "${PENDING}" "${DONE}" "${stagnant_count}"
     ITER_END=$(date +%s)
     ITER_DURATION=$((ITER_END - ITER_START))
 
+    # Stuck-in-loop detection: hash output and check for repeats
+    OUTPUT_HASH=$(compute_output_hash "${TASK_OUTPUT}")
+    track_output_hash "${OUTPUT_HASH}"
+    if detect_repeated_output; then
+        warn "  Repeated output detected — agent appears stuck in a loop."
+        # Force immediate stagnation escalation
+        if [[ ${stagnant_count} -lt 1 ]]; then
+            stagnant_count=1
+        fi
+    fi
+
     # Log output if verbose
     if [[ "${VERBOSE}" == true ]]; then
         echo "${TASK_OUTPUT}" > "${RALPH_DIR}/debug/iter-${iteration}-output.txt"
@@ -544,10 +588,32 @@ $(build_dynamic_prompt "${iteration}" "${PENDING}" "${DONE}" "${stagnant_count}"
         TIMED_OUT=true
     fi
 
-    # Extract error context for failed iterations (last 30 lines)
+    # Extract error context for failed iterations (last 20 lines, focused)
     ERROR_TAIL=""
     if [[ "${PROMISE_DONE}" == false ]] && [[ "${TASK_MARKED_DONE}" == false ]]; then
-        ERROR_TAIL=$(echo "${TASK_OUTPUT}" | tail -50)
+        # Try to find error-relevant lines first (errors, failures, exceptions)
+        local error_lines
+        error_lines=$(echo "${TASK_OUTPUT}" | grep -i -E '(error|fail|exception|panic|traceback|FAILED)' | tail -10 || true)
+        if [[ -n "${error_lines}" ]]; then
+            ERROR_TAIL="Key errors:
+${error_lines}
+
+Last 20 lines of output:
+$(echo "${TASK_OUTPUT}" | tail -20)"
+        else
+            ERROR_TAIL=$(echo "${TASK_OUTPUT}" | tail -20)
+        fi
+    fi
+
+    # Signal 5: Healthcheck (run before verdict for tasks that appear done)
+    HEALTHCHECK_PASSED=true
+    HC_OUTPUT=""
+    if [[ "${HEALTHCHECK_ENABLED}" == true ]] && [[ "${TIMED_OUT}" == false ]]; then
+        if [[ "${TASK_MARKED_DONE}" == true ]] || [[ "${PROMISE_DONE}" == true ]]; then
+            if ! HC_OUTPUT=$(run_healthcheck "${PROJECT_DIR}" "${HEALTHCHECK_TIMEOUT}"); then
+                HEALTHCHECK_PASSED=false
+            fi
+        fi
     fi
 
     # ── Decision logic ──
@@ -558,7 +624,7 @@ $(build_dynamic_prompt "${iteration}" "${PENDING}" "${DONE}" "${stagnant_count}"
         log_progress "${iteration}" "${COMPLETED_TASK}" "timeout" \
             "Exceeded ${EFFECTIVE_TIMEOUT}s. Files changed: ${FILES_CHANGED}" \
             "${ERROR_TAIL}" "${ITER_DURATION}"
-        mark_task_failed "${COMPLETED_TASK}" "${iteration}" "timeout after ${EFFECTIVE_TIMEOUT}s"
+        mark_task_failed "${COMPLETED_TASK}" "${iteration}" "timeout after ${EFFECTIVE_TIMEOUT}s" "timeout"
         attempts=$(get_task_attempt_count "${COMPLETED_TASK}")
         if [[ ${attempts} -ge ${MAX_TASK_ATTEMPTS} ]]; then
             warn "  Task exceeded ${MAX_TASK_ATTEMPTS} attempts — auto-blocking."
@@ -578,49 +644,59 @@ $(build_dynamic_prompt "${iteration}" "${PENDING}" "${DONE}" "${stagnant_count}"
         last_error_context=""
 
     elif [[ "${PROMISE_DONE}" == true ]] && [[ "${TASK_MARKED_DONE}" == true ]]; then
-        print_verdict "verified" "${COMPLETED_TASK}" "${ITER_DURATION}" \
-            "promise + PRD marked"
-        log_progress "${iteration}" "${COMPLETED_TASK}" "completed" \
-            "Verified: promise + PRD checkbox" "" "${ITER_DURATION}"
-        if [[ "${AUTO_COMMIT}" == true ]]; then
-            safe_commit "ralph: ${COMPLETED_TASK}" "${SKIP_HOOKS}"
-        fi
-        last_error_context=""
-        # Post-task healthcheck
-        if [[ "${HEALTHCHECK_ENABLED}" == true ]]; then
-            HC_OUTPUT=""
-            if ! HC_OUTPUT=$(run_healthcheck "${PROJECT_DIR}" "${HEALTHCHECK_TIMEOUT}"); then
-                print_verdict "healthcheck-failed" "${COMPLETED_TASK}" "${ITER_DURATION}" \
-                    "task completed but healthcheck failed"
-                log_progress "${iteration}" "${COMPLETED_TASK}" "healthcheck-failed" \
-                    "Healthcheck failed after task completion" "${HC_OUTPUT}" "${ITER_DURATION}"
-                last_error_context="Healthcheck failed after completing '${COMPLETED_TASK}':
-${HC_OUTPUT}"
-                stagnant_count=$((stagnant_count + 1))
+        if [[ "${HEALTHCHECK_PASSED}" == false ]]; then
+            # Downgrade: tests fail despite promise + PRD
+            print_verdict "healthcheck-failed" "${COMPLETED_TASK}" "${ITER_DURATION}" \
+                "promise + PRD marked but healthcheck failed"
+            log_progress "${iteration}" "${COMPLETED_TASK}" "healthcheck-failed" \
+                "Verified signals but healthcheck failed" "${HC_OUTPUT}" "${ITER_DURATION}"
+            if [[ "${AUTO_COMMIT}" == true ]]; then
+                safe_commit "ralph: ${COMPLETED_TASK} (healthcheck failing)" "${SKIP_HOOKS}"
             fi
+            last_error_context="Healthcheck failed after completing '${COMPLETED_TASK}':
+${HC_OUTPUT}"
+            stagnant_count=$((stagnant_count + 1))
+        else
+            print_verdict "verified" "${COMPLETED_TASK}" "${ITER_DURATION}" \
+                "promise + PRD marked + healthcheck passed"
+            log_progress "${iteration}" "${COMPLETED_TASK}" "completed" \
+                "Verified: promise + PRD checkbox + healthcheck" "" "${ITER_DURATION}"
+            if [[ "${AUTO_COMMIT}" == true ]]; then
+                safe_commit "ralph: ${COMPLETED_TASK}" "${SKIP_HOOKS}"
+            fi
+            # Capture learnings from verified completion
+            local changed_files
+            changed_files=$(git diff --name-only HEAD~1 HEAD 2>/dev/null | head -5 | tr '\n' ', ' || true)
+            append_learning "${COMPLETED_TASK}" "${changed_files:-none}"
+            last_error_context=""
         fi
 
     elif [[ "${TASK_MARKED_DONE}" == true ]] && [[ "${PROMISE_DONE}" == false ]]; then
-        print_verdict "completed" "${COMPLETED_TASK}" "${ITER_DURATION}" \
-            "PRD marked done (no promise string)"
-        log_progress "${iteration}" "${COMPLETED_TASK}" "completed" \
-            "PRD marked, no promise string" "" "${ITER_DURATION}"
-        if [[ "${AUTO_COMMIT}" == true ]]; then
-            safe_commit "ralph: ${COMPLETED_TASK}" "${SKIP_HOOKS}"
-        fi
-        last_error_context=""
-        # Post-task healthcheck
-        if [[ "${HEALTHCHECK_ENABLED}" == true ]]; then
-            HC_OUTPUT=""
-            if ! HC_OUTPUT=$(run_healthcheck "${PROJECT_DIR}" "${HEALTHCHECK_TIMEOUT}"); then
-                print_verdict "healthcheck-failed" "${COMPLETED_TASK}" "${ITER_DURATION}" \
-                    "task completed but healthcheck failed"
-                log_progress "${iteration}" "${COMPLETED_TASK}" "healthcheck-failed" \
-                    "Healthcheck failed after task completion" "${HC_OUTPUT}" "${ITER_DURATION}"
-                last_error_context="Healthcheck failed after completing '${COMPLETED_TASK}':
-${HC_OUTPUT}"
-                stagnant_count=$((stagnant_count + 1))
+        if [[ "${HEALTHCHECK_PASSED}" == false ]]; then
+            # Downgrade: tests fail despite PRD mark
+            print_verdict "healthcheck-failed" "${COMPLETED_TASK}" "${ITER_DURATION}" \
+                "PRD marked but healthcheck failed"
+            log_progress "${iteration}" "${COMPLETED_TASK}" "healthcheck-failed" \
+                "PRD marked but healthcheck failed" "${HC_OUTPUT}" "${ITER_DURATION}"
+            if [[ "${AUTO_COMMIT}" == true ]]; then
+                safe_commit "ralph: ${COMPLETED_TASK} (healthcheck failing)" "${SKIP_HOOKS}"
             fi
+            last_error_context="Healthcheck failed after completing '${COMPLETED_TASK}':
+${HC_OUTPUT}"
+            stagnant_count=$((stagnant_count + 1))
+        else
+            print_verdict "completed" "${COMPLETED_TASK}" "${ITER_DURATION}" \
+                "PRD marked done (no promise string)"
+            log_progress "${iteration}" "${COMPLETED_TASK}" "completed" \
+                "PRD marked, no promise string" "" "${ITER_DURATION}"
+            if [[ "${AUTO_COMMIT}" == true ]]; then
+                safe_commit "ralph: ${COMPLETED_TASK}" "${SKIP_HOOKS}"
+            fi
+            # Capture learnings from completion
+            local changed_files
+            changed_files=$(git diff --name-only HEAD~1 HEAD 2>/dev/null | head -5 | tr '\n' ', ' || true)
+            append_learning "${COMPLETED_TASK}" "${changed_files:-none}"
+            last_error_context=""
         fi
 
     elif [[ "${PROMISE_DONE}" == true ]] && [[ "${TASK_MARKED_DONE}" == false ]]; then
@@ -637,7 +713,7 @@ ${HC_OUTPUT}"
                 "claimed done but no file changes and no PRD mark"
             log_progress "${iteration}" "${COMPLETED_TASK}" "suspicious" \
                 "Promise without evidence" "${ERROR_TAIL}" "${ITER_DURATION}"
-            mark_task_failed "${COMPLETED_TASK}" "${iteration}" "claimed done but no changes"
+            mark_task_failed "${COMPLETED_TASK}" "${iteration}" "claimed done but no changes" "suspicious"
             attempts=$(get_task_attempt_count "${COMPLETED_TASK}")
             if [[ ${attempts} -ge ${MAX_TASK_ATTEMPTS} ]]; then
                 warn "  Task exceeded ${MAX_TASK_ATTEMPTS} attempts — auto-blocking."
@@ -658,7 +734,7 @@ ${HC_OUTPUT}"
             "no changes, no completion signal"
         log_progress "${iteration}" "${COMPLETED_TASK}" "no-progress" \
             "No file changes, no signals" "${ERROR_TAIL}" "${ITER_DURATION}"
-        mark_task_failed "${COMPLETED_TASK}" "${iteration}" "no progress"
+        mark_task_failed "${COMPLETED_TASK}" "${iteration}" "no progress" "no-progress"
         attempts=$(get_task_attempt_count "${COMPLETED_TASK}")
         if [[ ${attempts} -ge ${MAX_TASK_ATTEMPTS} ]]; then
             warn "  Task exceeded ${MAX_TASK_ATTEMPTS} attempts — auto-blocking."

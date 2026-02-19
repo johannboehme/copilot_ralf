@@ -439,7 +439,7 @@ init_ralph_dir() {
     # (creating .gitignore is the responsibility of PRD Task 1, not Ralph itself)
     local gitignore="${project_dir}/.gitignore"
     if [[ -f "${gitignore}" ]]; then
-        for pattern in ".ralph/progress.md" ".ralph/failed-tasks.txt" ".ralph/config.env" ".ralph/debug/"; do
+        for pattern in ".ralph/progress.md" ".ralph/failed-tasks.txt" ".ralph/config.env" ".ralph/debug/" ".ralph/learnings.md"; do
             if ! grep -qF "${pattern}" "${gitignore}" 2>/dev/null; then
                 echo "${pattern}" >> "${gitignore}"
             fi
@@ -771,10 +771,12 @@ mark_task_failed() {
     local task_title="$1"
     local iteration="$2"
     local reason="${3:-unknown}"
+    local category="${4:-no-progress}"
     local timestamp
     timestamp=$(date '+%Y-%m-%d %H:%M:%S')
 
-    echo "${timestamp} | iter ${iteration} | ${task_title} | ${reason}" >> "${RALPH_FAILED}"
+    # Categories: stagnation, timeout, test-fail, no-progress, blocked, suspicious
+    echo "${timestamp} | iter ${iteration} | ${task_title} | ${category} | ${reason}" >> "${RALPH_FAILED}"
 }
 
 get_failed_tasks() {
@@ -782,9 +784,34 @@ get_failed_tasks() {
         return
     fi
 
-    # Extract unique task titles with their last failure reason
+    # Extract unique task titles with their last failure category and reason
+    # Supports both old 4-field and new 5-field format
     grep -v '^#' "${RALPH_FAILED}" 2>/dev/null \
-        | awk -F' \\| ' '{title=$3; reason=$4; data[title]=reason; iter[title]=$2} END {for (t in data) print "- \"" t "\" — " iter[t] ": " data[t]}' \
+        | awk -F' \\| ' '{
+            title=$3
+            if (NF >= 5) { cat=$4; reason=$5 }
+            else { cat="unknown"; reason=$4 }
+            data[title]=reason; iter[title]=$2; cats[title]=cat
+        } END {
+            for (t in data) print "- \"" t "\" [" cats[t] "] — " iter[t] ": " data[t]
+        }' \
+        2>/dev/null || true
+}
+
+get_failure_summary() {
+    if [[ ! -f "${RALPH_FAILED}" ]] || [[ ! -s "${RALPH_FAILED}" ]]; then
+        return
+    fi
+
+    # Count failures by category
+    grep -v '^#' "${RALPH_FAILED}" 2>/dev/null \
+        | awk -F' \\| ' '{
+            if (NF >= 5) cat=$4
+            else cat="unknown"
+            counts[cat]++
+        } END {
+            for (c in counts) print "  " c ": " counts[c]
+        }' \
         2>/dev/null || true
 }
 
@@ -796,6 +823,22 @@ get_failed_task_count() {
     local n
     n=$(grep -cv '^#' "${RALPH_FAILED}" 2>/dev/null) || true
     echo "${n:-0}"
+}
+
+get_multi_failure_tasks() {
+    local min_failures="${1:-2}"
+    if [[ ! -f "${RALPH_FAILED}" ]]; then
+        return
+    fi
+
+    # Find tasks that have failed >= min_failures times and are still pending
+    grep -v '^#' "${RALPH_FAILED}" 2>/dev/null \
+        | awk -F' \\| ' -v min="${min_failures}" '{
+            title=$3; counts[title]++
+        } END {
+            for (t in counts) if (counts[t] >= min) print "- \"" t "\" (" counts[t] " failures)"
+        }' \
+        2>/dev/null || true
 }
 
 get_task_attempt_count() {
@@ -896,6 +939,76 @@ ${cmd_output}
     fi
 
     return 0
+}
+
+# ── Self-Improving Knowledge Base ─────────────────────────────────
+
+RALPH_LEARNINGS=""
+
+init_learnings() {
+    RALPH_LEARNINGS="${RALPH_DIR}/learnings.md"
+    if [[ ! -f "${RALPH_LEARNINGS}" ]]; then
+        echo "# Ralph Loop Learnings" > "${RALPH_LEARNINGS}"
+        echo "" >> "${RALPH_LEARNINGS}"
+        echo "_Patterns discovered during task execution._" >> "${RALPH_LEARNINGS}"
+    fi
+}
+
+append_learning() {
+    local task_title="$1"
+    local files_changed="$2"
+    local timestamp
+    timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+
+    if [[ -z "${RALPH_LEARNINGS}" ]]; then
+        return
+    fi
+
+    echo "- [${timestamp}] **${task_title}** — files: ${files_changed}" >> "${RALPH_LEARNINGS}"
+}
+
+get_learnings() {
+    if [[ -z "${RALPH_LEARNINGS}" ]] || [[ ! -f "${RALPH_LEARNINGS}" ]]; then
+        return
+    fi
+
+    # Return last 10 learnings (skip header)
+    grep '^- \[' "${RALPH_LEARNINGS}" 2>/dev/null | tail -10 || true
+}
+
+# ── Output Hash Tracking (stuck-in-loop detection) ───────────────
+
+RALPH_OUTPUT_HASHES=()
+
+compute_output_hash() {
+    local output="$1"
+    # Strip timestamps, iteration numbers, and ANSI codes to get a content signature
+    echo "${output}" \
+        | sed 's/[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}//g' \
+        | sed 's/[Ii]teration [0-9]*/iteration N/g' \
+        | sed $'s/\x1b\[[0-9;?]*[a-zA-Z]//g' \
+        | shasum -a 256 | cut -d' ' -f1
+}
+
+track_output_hash() {
+    local hash="$1"
+    RALPH_OUTPUT_HASHES+=("${hash}")
+    # Keep only last 3
+    if [[ ${#RALPH_OUTPUT_HASHES[@]} -gt 3 ]]; then
+        RALPH_OUTPUT_HASHES=("${RALPH_OUTPUT_HASHES[@]:1}")
+    fi
+}
+
+detect_repeated_output() {
+    if [[ ${#RALPH_OUTPUT_HASHES[@]} -lt 2 ]]; then
+        return 1
+    fi
+    local last="${RALPH_OUTPUT_HASHES[-1]}"
+    local prev="${RALPH_OUTPUT_HASHES[-2]}"
+    if [[ "${last}" == "${prev}" ]]; then
+        return 0
+    fi
+    return 1
 }
 
 # ── Checkpoint Tasks ─────────────────────────────────────────────
@@ -1019,6 +1132,44 @@ preflight_check() {
     return 0
 }
 
+# ── Efficiency Metrics ─────────────────────────────────────────────
+
+get_iteration_durations() {
+    # Extract durations from progress log
+    if [[ ! -f "${RALPH_PROGRESS}" ]]; then
+        return
+    fi
+    grep '^\- \*\*Duration:\*\*' "${RALPH_PROGRESS}" 2>/dev/null \
+        | sed 's/.*Duration:\*\* \([0-9]*\)s.*/\1/' || true
+}
+
+get_slowest_task() {
+    if [[ ! -f "${RALPH_PROGRESS}" ]]; then
+        return
+    fi
+
+    # Find iteration with longest duration
+    local max_duration=0
+    local max_task=""
+    local current_task=""
+    while IFS= read -r line; do
+        if [[ "${line}" =~ ^\-\ \*\*Task:\*\*\ (.*) ]]; then
+            current_task="${BASH_REMATCH[1]}"
+        fi
+        if [[ "${line}" =~ ^\-\ \*\*Duration:\*\*\ ([0-9]+)s ]]; then
+            local dur="${BASH_REMATCH[1]}"
+            if [[ ${dur} -gt ${max_duration} ]]; then
+                max_duration=${dur}
+                max_task="${current_task}"
+            fi
+        fi
+    done < "${RALPH_PROGRESS}"
+
+    if [[ ${max_duration} -gt 0 ]]; then
+        echo "${max_task} ($(format_duration "${max_duration}"))"
+    fi
+}
+
 # ── Summary Report ────────────────────────────────────────────────
 
 print_summary() {
@@ -1062,7 +1213,29 @@ print_summary() {
     echo ""
     echo -e "  ${GREEN}Completed:${NC}  ${completed}    ${YELLOW}Pending:${NC} ${pending}    ${RED}Blocked:${NC} ${blocked}    ${DIM}Failed:${NC} ${failed_count}"
     echo -e "  Iterations: ${total_iterations}  |  Duration: $(format_duration "${total_time}")  |  Avg/task: ${avg_time}"
+
+    # Efficiency metrics
+    local avg_iter_time="n/a"
+    if [[ "${total_iterations}" -gt 0 ]]; then
+        local avg_iter=$((total_time / total_iterations))
+        avg_iter_time="$(format_duration "${avg_iter}")"
+    fi
+    local slowest
+    slowest=$(get_slowest_task)
+    echo -e "  Avg/iteration: ${avg_iter_time}"
+    if [[ -n "${slowest}" ]]; then
+        echo -e "  Slowest task: ${slowest}"
+    fi
     echo ""
+
+    # Failure category breakdown
+    local failure_breakdown
+    failure_breakdown=$(get_failure_summary)
+    if [[ -n "${failure_breakdown}" ]]; then
+        echo -e "  ${RED}Failure breakdown:${NC}"
+        echo "${failure_breakdown}"
+        echo ""
+    fi
 
     # List completed tasks
     local done_tasks

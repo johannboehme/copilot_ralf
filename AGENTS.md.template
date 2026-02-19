@@ -35,6 +35,12 @@ npm run build     # or: go build, cargo build, etc.
 ```
 <!-- ralph:verify:end -->
 
+## Learnings
+
+<!-- ralph:learnings:start -->
+<!-- Patterns discovered during Ralph Loop execution will be appended here automatically -->
+<!-- ralph:learnings:end -->
+
 ## Important Rules
 
 - Follow existing patterns in the codebase
