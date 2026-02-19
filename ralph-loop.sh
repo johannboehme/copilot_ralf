@@ -20,7 +20,7 @@ source "${SCRIPT_DIR}/ralph-lib.sh"
 PROJECT_DIR="${RALPH_PROJECT_DIR:-.}"
 LOOP_MODEL="${RALPH_LOOP_MODEL:-gpt-4.1}"
 PLAN_MODEL="${RALPH_PLAN_MODEL:-claude-sonnet-4.5}"
-MAX_ITERATIONS="${RALPH_MAX_ITERATIONS:-50}"
+MAX_TASK_ATTEMPTS="${RALPH_MAX_TASK_ATTEMPTS:-3}"
 MAX_STAGNANT="${RALPH_MAX_STAGNANT:-3}"
 TASK_TIMEOUT="${RALPH_TASK_TIMEOUT:-900}"
 AUTO_COMMIT="${RALPH_AUTO_COMMIT:-true}"
@@ -43,7 +43,7 @@ Run the Ralph Loop: iteratively complete tasks from .ralph/prd.md.
 Options:
   -m, --model <model>       Model for task execution (default: ${LOOP_MODEL})
   -p, --project <dir>       Project directory (default: current directory)
-  -n, --max-iterations <n>  Maximum loop iterations (default: ${MAX_ITERATIONS})
+  -a, --max-attempts <n>    Max attempts per task before auto-blocking (default: ${MAX_TASK_ATTEMPTS})
   -s, --max-stagnant <n>    Stagnation circuit breaker (default: ${MAX_STAGNANT})
   -t, --timeout <secs>      Timeout per task in seconds (default: ${TASK_TIMEOUT})
   --no-commit               Don't auto-commit after each task
@@ -56,7 +56,7 @@ Options:
 Environment variables:
   RALPH_LOOP_MODEL          Model for execution (default: gpt-4.1)
   RALPH_PLAN_MODEL          Smart model for escalation (default: claude-sonnet-4.5)
-  RALPH_MAX_ITERATIONS      Max iterations (default: 50)
+  RALPH_MAX_TASK_ATTEMPTS   Max attempts per task before auto-blocking (default: 3)
   RALPH_MAX_STAGNANT        Stagnation limit before halt (default: 3)
   RALPH_TASK_TIMEOUT        Seconds per task (default: 900)
   RALPH_AUTO_COMMIT         Auto-commit after tasks (default: true)
@@ -77,7 +77,7 @@ while [[ $# -gt 0 ]]; do
             init_ralph_dir "${PROJECT_DIR}"
             AGENTS_FILE="${PROJECT_DIR}/AGENTS.md"
             shift 2 ;;
-        -n|--max-iterations) MAX_ITERATIONS="$2"; shift 2 ;;
+        -a|--max-attempts) MAX_TASK_ATTEMPTS="$2"; shift 2 ;;
         -s|--max-stagnant) MAX_STAGNANT="$2"; shift 2 ;;
         -t|--timeout) TASK_TIMEOUT="$2"; shift 2 ;;
         --no-commit) AUTO_COMMIT=false; shift ;;
@@ -295,7 +295,7 @@ echo -e "${BLUE}║       Ralph Loop — Starting          ║${NC}"
 echo -e "${BLUE}╚══════════════════════════════════════╝${NC}"
 echo ""
 echo -e "  ${YELLOW}Model:${NC} ${LOOP_MODEL}  ${DIM}|${NC}  ${YELLOW}Escalation:${NC} ${PLAN_MODEL}"
-echo -e "  ${YELLOW}Limits:${NC} ${MAX_ITERATIONS} iters, ${MAX_STAGNANT} stagnant, $(format_duration "${TASK_TIMEOUT}")/task"
+echo -e "  ${YELLOW}Limits:${NC} ${MAX_TASK_ATTEMPTS} attempts/task, ${MAX_STAGNANT} stagnant, $(format_duration "${TASK_TIMEOUT}")/task"
 echo -e "  ${YELLOW}Options:${NC} commit=${AUTO_COMMIT} two-phase=${TWO_PHASE} verbose=${VERBOSE}"
 echo ""
 print_progress_bar "${INITIAL_DONE}" "${INITIAL_TOTAL}"
@@ -333,7 +333,7 @@ last_error_context=""
 # Cache static prompt (doesn't change between iterations)
 STATIC_PROMPT=$(build_static_prompt)
 
-while [[ ${iteration} -lt ${MAX_ITERATIONS} ]]; do
+while true; do
     iteration=$((iteration + 1))
     ITER_START=$(date +%s)
 
@@ -405,7 +405,7 @@ while [[ ${iteration} -lt ${MAX_ITERATIONS} ]]; do
     ELAPSED=$(($(date +%s) - LOOP_START_TIME))
     NEXT_TASK=$(get_next_pending_task)
 
-    print_dashboard "${iteration}" "${MAX_ITERATIONS}" "${CURRENT_MODEL}" \
+    print_dashboard "${iteration}" "${CURRENT_MODEL}" \
         "${stagnant_count}" "${DONE}" "${TOTAL_TASKS}" \
         "${NEXT_TASK}" "${ELAPSED}" "${EFFECTIVE_TIMEOUT}"
 
@@ -534,6 +534,11 @@ $(build_dynamic_prompt "${iteration}" "${PENDING}" "${DONE}" "${stagnant_count}"
             "Exceeded ${EFFECTIVE_TIMEOUT}s. Files changed: ${FILES_CHANGED}" \
             "${ERROR_TAIL}" "${ITER_DURATION}"
         mark_task_failed "${COMPLETED_TASK}" "${iteration}" "timeout after ${EFFECTIVE_TIMEOUT}s"
+        attempts=$(get_task_attempt_count "${COMPLETED_TASK}")
+        if [[ ${attempts} -ge ${MAX_TASK_ATTEMPTS} ]]; then
+            warn "  Task exceeded ${MAX_TASK_ATTEMPTS} attempts — auto-blocking."
+            auto_block_task "${COMPLETED_TASK}"
+        fi
         if [[ "${FILES_CHANGED}" == true ]]; then
             dim "    Partial work stashed (not destroyed)."
             safe_revert "${iteration}" "timeout"
@@ -582,6 +587,11 @@ $(build_dynamic_prompt "${iteration}" "${PENDING}" "${DONE}" "${stagnant_count}"
             log_progress "${iteration}" "${COMPLETED_TASK}" "suspicious" \
                 "Promise without evidence" "${ERROR_TAIL}" "${ITER_DURATION}"
             mark_task_failed "${COMPLETED_TASK}" "${iteration}" "claimed done but no changes"
+            attempts=$(get_task_attempt_count "${COMPLETED_TASK}")
+            if [[ ${attempts} -ge ${MAX_TASK_ATTEMPTS} ]]; then
+                warn "  Task exceeded ${MAX_TASK_ATTEMPTS} attempts — auto-blocking."
+                auto_block_task "${COMPLETED_TASK}"
+            fi
         fi
         last_error_context="${ERROR_TAIL}"
 
@@ -598,6 +608,11 @@ $(build_dynamic_prompt "${iteration}" "${PENDING}" "${DONE}" "${stagnant_count}"
         log_progress "${iteration}" "${COMPLETED_TASK}" "no-progress" \
             "No file changes, no signals" "${ERROR_TAIL}" "${ITER_DURATION}"
         mark_task_failed "${COMPLETED_TASK}" "${iteration}" "no progress"
+        attempts=$(get_task_attempt_count "${COMPLETED_TASK}")
+        if [[ ${attempts} -ge ${MAX_TASK_ATTEMPTS} ]]; then
+            warn "  Task exceeded ${MAX_TASK_ATTEMPTS} attempts — auto-blocking."
+            auto_block_task "${COMPLETED_TASK}"
+        fi
         last_error_context="${ERROR_TAIL}"
     fi
 
@@ -617,10 +632,3 @@ $(build_dynamic_prompt "${iteration}" "${PENDING}" "${DONE}" "${stagnant_count}"
 
     echo ""
 done
-
-warn "Maximum iterations (${MAX_ITERATIONS}) reached."
-REMAINING=$(count_pending)
-BLOCKED=$(count_blocked)
-warn "${REMAINING} tasks pending, ${BLOCKED} blocked. Run again to continue."
-print_summary "${iteration}" "${LOOP_START_TIME}" "$(date +%s)"
-exit 1

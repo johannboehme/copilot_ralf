@@ -242,14 +242,13 @@ get_next_pending_task() {
 
 print_dashboard() {
     local iteration="$1"
-    local max_iterations="$2"
-    local model="$3"
-    local stagnant_count="$4"
-    local done="$5"
-    local total="$6"
-    local task_name="$7"
-    local elapsed="$8"
-    local timeout="$9"
+    local model="$2"
+    local stagnant_count="$3"
+    local done="$4"
+    local total="$5"
+    local task_name="$6"
+    local elapsed="$7"
+    local timeout="$8"
 
     local escalated=""
     if [[ "${model}" != "${LOOP_MODEL:-}" ]] && [[ "${stagnant_count}" -gt 0 ]]; then
@@ -262,7 +261,7 @@ print_dashboard() {
     fi
 
     echo -e "${CYAN}┌─────────────────────────────────────────────────────────┐${NC}"
-    echo -e "${CYAN}│${NC} ${BOLD}Iteration ${iteration}/${max_iterations}${NC}  |  ${model}${escalated}${stag_display}"
+    echo -e "${CYAN}│${NC} ${BOLD}Iteration ${iteration}${NC}  |  ${model}${escalated}${stag_display}"
     echo -e "${CYAN}│${NC}"
     print_progress_bar "${done}" "${total}"
     echo -e "${CYAN}│${NC}"
@@ -755,6 +754,30 @@ get_failed_task_count() {
     local n
     n=$(grep -cv '^#' "${RALPH_FAILED}" 2>/dev/null) || true
     echo "${n:-0}"
+}
+
+get_task_attempt_count() {
+    local title="$1"
+    if [[ ! -f "${RALPH_FAILED}" ]]; then
+        echo "0"
+        return
+    fi
+    local n
+    n=$(grep -cF "| ${title} |" "${RALPH_FAILED}" 2>/dev/null) || true
+    echo "${n:-0}"
+}
+
+auto_block_task() {
+    local title="$1"
+    local prd_file="${RALPH_PRD}"
+
+    if [[ "$(uname)" == "Darwin" ]]; then
+        sed -i '' "s/^- \[ \] \*\*${title}\*\*/- [~] **${title}**/" "${prd_file}"
+    else
+        sed -i "s/^- \[ \] \*\*${title}\*\*/- [~] **${title}**/" "${prd_file}"
+    fi
+
+    log_progress "—" "${title}" "auto-blocked" "Exceeded max attempts"
 }
 
 # ── Pre-flight Checks ────────────────────────────────────────────

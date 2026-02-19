@@ -212,7 +212,7 @@ All options can be set via CLI flags or environment variables:
 | `--plan-model` | `RALPH_PLAN_MODEL` | `claude-sonnet-4.5` | Model used for planning |
 | `--loop-model` | `RALPH_LOOP_MODEL` | `gpt-4.1` | Model used for execution |
 | `-p, --project` | `RALPH_PROJECT_DIR` | `.` | Project directory to work in |
-| `-n, --max-iterations` | `RALPH_MAX_ITERATIONS` | `50` | Max loop iterations before stopping |
+| `-a, --max-attempts` | `RALPH_MAX_TASK_ATTEMPTS` | `3` | Max attempts per task before auto-blocking |
 | `--no-commit` | `RALPH_AUTO_COMMIT=false` | `true` | Auto-commit after each completed task |
 | `--skip-hooks` | `RALPH_SKIP_HOOKS` | `false` | Skip git pre-commit hooks |
 | `--skip-review` | `RALPH_SKIP_REVIEW` | `false` | Skip the PRD review step |

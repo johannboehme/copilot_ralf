@@ -16,7 +16,7 @@ source "${SCRIPT_DIR}/ralph-lib.sh"
 RALPH_PLAN_MODEL="${RALPH_PLAN_MODEL:-claude-sonnet-4.5}"
 RALPH_LOOP_MODEL="${RALPH_LOOP_MODEL:-gpt-4.1}"
 RALPH_PROJECT_DIR="${RALPH_PROJECT_DIR:-.}"
-RALPH_MAX_ITERATIONS="${RALPH_MAX_ITERATIONS:-50}"
+RALPH_MAX_TASK_ATTEMPTS="${RALPH_MAX_TASK_ATTEMPTS:-3}"
 RALPH_AUTO_COMMIT="${RALPH_AUTO_COMMIT:-true}"
 RALPH_SKIP_REVIEW="${RALPH_SKIP_REVIEW:-false}"
 RALPH_SKIP_HOOKS="${RALPH_SKIP_HOOKS:-false}"
@@ -35,7 +35,7 @@ Options:
   --plan-model <model>      Model for planning (default: ${RALPH_PLAN_MODEL})
   --loop-model <model>      Model for execution (default: ${RALPH_LOOP_MODEL})
   -p, --project <dir>       Project directory (default: current directory)
-  -n, --max-iterations <n>  Max loop iterations (default: ${RALPH_MAX_ITERATIONS})
+  -a, --max-attempts <n>    Max attempts per task before auto-blocking (default: ${RALPH_MAX_TASK_ATTEMPTS})
   --no-commit               Don't auto-commit after each task
   --skip-review             Skip PRD review step (fully autonomous)
   --skip-hooks              Skip git pre-commit hooks
@@ -49,7 +49,7 @@ Environment variables:
   RALPH_PLAN_MODEL          Planning model (default: claude-sonnet-4.5)
   RALPH_LOOP_MODEL          Execution model (default: gpt-4.1)
   RALPH_PROJECT_DIR         Project directory (default: .)
-  RALPH_MAX_ITERATIONS      Max loop iterations (default: 50)
+  RALPH_MAX_TASK_ATTEMPTS   Max attempts per task before auto-blocking (default: 3)
   RALPH_AUTO_COMMIT         Auto-commit after tasks (default: true)
   RALPH_SKIP_HOOKS          Skip pre-commit hooks (default: false)
   RALPH_TWO_PHASE           Two-phase execution (default: false)
@@ -76,7 +76,7 @@ while [[ $# -gt 0 ]]; do
         --plan-model) RALPH_PLAN_MODEL="$2"; shift 2 ;;
         --loop-model) RALPH_LOOP_MODEL="$2"; shift 2 ;;
         -p|--project) RALPH_PROJECT_DIR="$2"; shift 2 ;;
-        -n|--max-iterations) RALPH_MAX_ITERATIONS="$2"; shift 2 ;;
+        -a|--max-attempts) RALPH_MAX_TASK_ATTEMPTS="$2"; shift 2 ;;
         --no-commit) RALPH_AUTO_COMMIT=false; shift ;;
         --skip-review) RALPH_SKIP_REVIEW=true; shift ;;
         --skip-hooks) RALPH_SKIP_HOOKS=true; shift ;;
@@ -101,7 +101,7 @@ fi
 export RALPH_PROJECT_DIR
 export RALPH_PLAN_MODEL
 export RALPH_LOOP_MODEL
-export RALPH_MAX_ITERATIONS
+export RALPH_MAX_TASK_ATTEMPTS
 export RALPH_AUTO_COMMIT
 export RALPH_SKIP_HOOKS
 export RALPH_TWO_PHASE
@@ -173,7 +173,7 @@ echo ""
 echo -e "${CYAN}━━━ Phase 2: Execution Loop ━━━${NC}"
 echo ""
 
-LOOP_ARGS=(-m "${RALPH_LOOP_MODEL}" -p "${RALPH_PROJECT_DIR}" -n "${RALPH_MAX_ITERATIONS}")
+LOOP_ARGS=(-m "${RALPH_LOOP_MODEL}" -p "${RALPH_PROJECT_DIR}" -a "${RALPH_MAX_TASK_ATTEMPTS}")
 [[ "${RALPH_AUTO_COMMIT}" == false ]] && LOOP_ARGS+=(--no-commit)
 [[ "${RALPH_SKIP_HOOKS}" == true ]] && LOOP_ARGS+=(--skip-hooks)
 [[ "${RALPH_TWO_PHASE}" == true ]] && LOOP_ARGS+=(--two-phase)
