@@ -180,12 +180,13 @@ CONF
 
 TASK_COUNT=$(count_pending)
 DONE_COUNT=$(count_done)
+TOTAL_COUNT=$((TASK_COUNT + DONE_COUNT))
 
 echo ""
 success "=== PRD Generated ==="
 echo -e "${YELLOW}File:${NC}       ${RALPH_PRD}"
-echo -e "${YELLOW}Tasks:${NC}      ${TASK_COUNT} pending, ${DONE_COUNT} completed"
-echo -e "${YELLOW}Progress:${NC}   ${RALPH_PROGRESS}"
+print_progress_bar "${DONE_COUNT}" "${TOTAL_COUNT}"
+echo -e "  ${YELLOW}Tasks:${NC} ${TASK_COUNT} pending, ${DONE_COUNT} completed"
 echo ""
 info "Next step: Review the PRD, then run:"
 echo -e "  ${GREEN}./ralph-loop.sh -p ${PROJECT_DIR}${NC}"

@@ -286,19 +286,38 @@ IMPL
 
 # ── Main Loop ─────────────────────────────────────────────────────
 
+INITIAL_PENDING=$(count_pending)
+INITIAL_DONE=$(count_done)
+INITIAL_TOTAL=$((INITIAL_PENDING + INITIAL_DONE + $(count_blocked)))
+
 echo -e "${BLUE}╔══════════════════════════════════════╗${NC}"
 echo -e "${BLUE}║       Ralph Loop — Starting          ║${NC}"
 echo -e "${BLUE}╚══════════════════════════════════════╝${NC}"
 echo ""
-echo -e "${YELLOW}Model:${NC}            ${LOOP_MODEL}"
-echo -e "${YELLOW}PRD:${NC}              ${RALPH_PRD}"
-echo -e "${YELLOW}Max iterations:${NC}   ${MAX_ITERATIONS}"
-echo -e "${YELLOW}Stagnation limit:${NC} ${MAX_STAGNANT} iterations (+adaptive recovery)"
-echo -e "${YELLOW}Task timeout:${NC}     ${TASK_TIMEOUT}s"
-echo -e "${YELLOW}Auto-commit:${NC}      ${AUTO_COMMIT}"
-echo -e "${YELLOW}Two-phase:${NC}        ${TWO_PHASE}"
-echo -e "${YELLOW}Verbose:${NC}          ${VERBOSE}"
+echo -e "  ${YELLOW}Model:${NC} ${LOOP_MODEL}  ${DIM}|${NC}  ${YELLOW}Escalation:${NC} ${PLAN_MODEL}"
+echo -e "  ${YELLOW}Limits:${NC} ${MAX_ITERATIONS} iters, ${MAX_STAGNANT} stagnant, $(format_duration "${TASK_TIMEOUT}")/task"
+echo -e "  ${YELLOW}Options:${NC} commit=${AUTO_COMMIT} two-phase=${TWO_PHASE} verbose=${VERBOSE}"
 echo ""
+print_progress_bar "${INITIAL_DONE}" "${INITIAL_TOTAL}"
+echo ""
+
+# Preview first pending tasks
+PREVIEW_TASKS=$(grep '^\- \[ \]' "${RALPH_PRD}" 2>/dev/null \
+    | head -5 \
+    | sed 's/^- \[ \] \*\*\(.*\)\*\*.*/\1/' \
+    | sed 's/\[effort:.*\]//' || true)
+if [[ -n "${PREVIEW_TASKS}" ]]; then
+    echo -e "  ${DIM}Next tasks:${NC}"
+    while IFS= read -r t; do
+        t=$(echo "${t}" | xargs 2>/dev/null)
+        if [[ ${#t} -gt 50 ]]; then t="${t:0:47}..."; fi
+        echo -e "    ${DIM}○${NC} ${t}"
+    done <<< "${PREVIEW_TASKS}"
+    if [[ "${INITIAL_PENDING}" -gt 5 ]]; then
+        echo -e "    ${DIM}... and $((INITIAL_PENDING - 5)) more${NC}"
+    fi
+    echo ""
+fi
 
 # Create debug directory if verbose
 if [[ "${VERBOSE}" == true ]]; then
@@ -371,16 +390,6 @@ while [[ ${iteration} -lt ${MAX_ITERATIONS} ]]; do
         info "  Model escalation: using ${PLAN_MODEL} for this iteration"
     fi
 
-    echo -e "${CYAN}┌──────────────────────────────────────┐${NC}"
-    echo -e "${CYAN}│ Iteration ${iteration}/${MAX_ITERATIONS} (${DONE} done, ${PENDING} pending) [${CURRENT_MODEL}]${NC}"
-    echo -e "${CYAN}└──────────────────────────────────────┘${NC}"
-
-    if [[ "${DRY_RUN}" == true ]]; then
-        warn "  [DRY RUN] Would send PRD to ${CURRENT_MODEL}"
-        ITER_END=$(date +%s)
-        continue
-    fi
-
     # Parse effort level from the next pending task for timeout adjustment
     EFFECTIVE_TIMEOUT="${TASK_TIMEOUT}"
     NEXT_EFFORT=$(grep -m1 '^\- \[ \]' "${RALPH_PRD}" 2>/dev/null \
@@ -391,6 +400,20 @@ while [[ ${iteration} -lt ${MAX_ITERATIONS} ]]; do
         high)   EFFECTIVE_TIMEOUT=$((TASK_TIMEOUT * 2)) ;;
         *)      EFFECTIVE_TIMEOUT="${TASK_TIMEOUT}" ;;
     esac
+
+    TOTAL_TASKS=$((DONE + PENDING + $(count_blocked)))
+    ELAPSED=$(($(date +%s) - LOOP_START_TIME))
+    NEXT_TASK=$(get_next_pending_task)
+
+    print_dashboard "${iteration}" "${MAX_ITERATIONS}" "${CURRENT_MODEL}" \
+        "${stagnant_count}" "${DONE}" "${TOTAL_TASKS}" \
+        "${NEXT_TASK}" "${ELAPSED}" "${EFFECTIVE_TIMEOUT}"
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        warn "  [DRY RUN] Would send PRD to ${CURRENT_MODEL}"
+        ITER_END=$(date +%s)
+        continue
+    fi
 
     # Snapshot git state before execution
     STATE_BEFORE=$(snapshot_git_state)
@@ -434,14 +457,20 @@ $(build_dynamic_prompt "${iteration}" "${PENDING}" "${DONE}" "${stagnant_count}"
     fi
 
     # Execute via copilot_yolo
-    success "  Executing with ${CURRENT_MODEL}..."
+    echo -e "  ${DIM}Executing with ${CURRENT_MODEL}...${NC}"
 
     TASK_OUTPUT_FILE=$(ralph_mktemp)
+
+    start_output_peek "${TASK_OUTPUT_FILE}"
+
     if [[ "${EFFECTIVE_TIMEOUT}" -gt 0 ]]; then
         run_copilot_yolo_with_timeout "${EFFECTIVE_TIMEOUT}" --model "${CURRENT_MODEL}" --no-pull -p "${AGENT_PROMPT}" > "${TASK_OUTPUT_FILE}" 2>&1 || TASK_EXIT=$?
     else
         run_copilot_yolo --model "${CURRENT_MODEL}" --no-pull -p "${AGENT_PROMPT}" > "${TASK_OUTPUT_FILE}" 2>&1 || TASK_EXIT=$?
     fi
+
+    stop_output_peek
+
     TASK_OUTPUT=$(cat "${TASK_OUTPUT_FILE}" 2>/dev/null)
     rm -f "${TASK_OUTPUT_FILE}"
 
@@ -497,26 +526,28 @@ $(build_dynamic_prompt "${iteration}" "${PENDING}" "${DONE}" "${stagnant_count}"
     # ── Decision logic ──
 
     if [[ "${TIMED_OUT}" == true ]]; then
-        echo -e "${RED}  TIMEOUT: Task exceeded ${EFFECTIVE_TIMEOUT}s limit${NC}"
+        print_verdict "timeout" "${COMPLETED_TASK}" "${ITER_DURATION}" \
+            "exceeded $(format_duration "${EFFECTIVE_TIMEOUT}") limit"
         log_progress "${iteration}" "${COMPLETED_TASK}" "timeout" \
             "Exceeded ${EFFECTIVE_TIMEOUT}s. Files changed: ${FILES_CHANGED}" \
             "${ERROR_TAIL}" "${ITER_DURATION}"
         mark_task_failed "${COMPLETED_TASK}" "${iteration}" "timeout after ${EFFECTIVE_TIMEOUT}s"
         if [[ "${FILES_CHANGED}" == true ]]; then
-            warn "  Partial work stashed (not destroyed)."
+            dim "    Partial work stashed (not destroyed)."
             safe_revert "${iteration}" "timeout"
         fi
         last_error_context="Task timed out after ${EFFECTIVE_TIMEOUT}s"
 
     elif [[ "${PROMISE_BLOCKED}" == true ]]; then
-        echo -e "${RED}  BLOCKED: Agent reported all remaining tasks are blocked${NC}"
+        print_verdict "blocked" "${COMPLETED_TASK}" "${ITER_DURATION}" \
+            "agent reported all remaining tasks are blocked"
         log_progress "${iteration}" "${COMPLETED_TASK}" "blocked" \
             "Agent self-reported blocker" "" "${ITER_DURATION}"
         last_error_context=""
 
     elif [[ "${PROMISE_DONE}" == true ]] && [[ "${TASK_MARKED_DONE}" == true ]]; then
-        # Best case: promise + PRD marked
-        success "  VERIFIED: Task completed (promise + PRD marked) [${ITER_DURATION}s]"
+        print_verdict "verified" "${COMPLETED_TASK}" "${ITER_DURATION}" \
+            "promise + PRD marked"
         log_progress "${iteration}" "${COMPLETED_TASK}" "completed" \
             "Verified: promise + PRD checkbox" "" "${ITER_DURATION}"
         if [[ "${AUTO_COMMIT}" == true ]]; then
@@ -525,8 +556,8 @@ $(build_dynamic_prompt "${iteration}" "${PENDING}" "${DONE}" "${stagnant_count}"
         last_error_context=""
 
     elif [[ "${TASK_MARKED_DONE}" == true ]] && [[ "${PROMISE_DONE}" == false ]]; then
-        # PRD marked but no promise — trust the PRD
-        success "  COMPLETED: Task marked done in PRD (no promise string) [${ITER_DURATION}s]"
+        print_verdict "completed" "${COMPLETED_TASK}" "${ITER_DURATION}" \
+            "PRD marked done (no promise string)"
         log_progress "${iteration}" "${COMPLETED_TASK}" "completed" \
             "PRD marked, no promise string" "" "${ITER_DURATION}"
         if [[ "${AUTO_COMMIT}" == true ]]; then
@@ -535,16 +566,17 @@ $(build_dynamic_prompt "${iteration}" "${PENDING}" "${DONE}" "${stagnant_count}"
         last_error_context=""
 
     elif [[ "${PROMISE_DONE}" == true ]] && [[ "${TASK_MARKED_DONE}" == false ]]; then
-        # Promise but no PRD mark
         if [[ "${FILES_CHANGED}" == true ]]; then
-            warn "  PARTIAL: Agent claimed done but didn't mark PRD. Files changed. [${ITER_DURATION}s]"
+            print_verdict "partial" "${COMPLETED_TASK}" "${ITER_DURATION}" \
+                "claimed done but PRD not marked, files changed"
             log_progress "${iteration}" "${COMPLETED_TASK}" "partial" \
                 "Promise + file changes but PRD not marked" "" "${ITER_DURATION}"
             if [[ "${AUTO_COMMIT}" == true ]]; then
                 safe_commit "ralph: ${COMPLETED_TASK} (partial)" "${SKIP_HOOKS}"
             fi
         else
-            warn "  SUSPICIOUS: Agent claimed done but no file changes and no PRD mark [${ITER_DURATION}s]"
+            print_verdict "suspicious" "${COMPLETED_TASK}" "${ITER_DURATION}" \
+                "claimed done but no file changes and no PRD mark"
             log_progress "${iteration}" "${COMPLETED_TASK}" "suspicious" \
                 "Promise without evidence" "${ERROR_TAIL}" "${ITER_DURATION}"
             mark_task_failed "${COMPLETED_TASK}" "${iteration}" "claimed done but no changes"
@@ -552,15 +584,15 @@ $(build_dynamic_prompt "${iteration}" "${PENDING}" "${DONE}" "${stagnant_count}"
         last_error_context="${ERROR_TAIL}"
 
     elif [[ "${FILES_CHANGED}" == true ]]; then
-        # Files changed but no completion signal — agent may have crashed
-        warn "  INCOMPLETE: Files changed but no completion signal [${ITER_DURATION}s]"
+        print_verdict "incomplete" "${COMPLETED_TASK}" "${ITER_DURATION}" \
+            "files changed but no completion signal"
         log_progress "${iteration}" "${COMPLETED_TASK}" "incomplete" \
             "Files changed, no completion signal" "${ERROR_TAIL}" "${ITER_DURATION}"
         last_error_context="${ERROR_TAIL}"
 
     else
-        # No changes, no signals
-        warn "  NO PROGRESS: No changes, no completion signal [${ITER_DURATION}s]"
+        print_verdict "no-progress" "${COMPLETED_TASK}" "${ITER_DURATION}" \
+            "no changes, no completion signal"
         log_progress "${iteration}" "${COMPLETED_TASK}" "no-progress" \
             "No file changes, no signals" "${ERROR_TAIL}" "${ITER_DURATION}"
         mark_task_failed "${COMPLETED_TASK}" "${iteration}" "no progress"

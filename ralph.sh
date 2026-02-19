@@ -115,10 +115,8 @@ echo -e "${BLUE}╔════════════════════�
 echo -e "${BLUE}║          Ralph Loop — Autonomous Agent       ║${NC}"
 echo -e "${BLUE}╚══════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "${YELLOW}Plan model:${NC}  ${RALPH_PLAN_MODEL}"
-echo -e "${YELLOW}Loop model:${NC}  ${RALPH_LOOP_MODEL}"
-echo -e "${YELLOW}Project:${NC}     ${RALPH_PROJECT_DIR}"
-echo -e "${YELLOW}State dir:${NC}   .ralph/"
+echo -e "  ${YELLOW}Models:${NC}  ${RALPH_PLAN_MODEL} ${DIM}(plan)${NC}  →  ${RALPH_LOOP_MODEL} ${DIM}(exec)${NC}"
+echo -e "  ${YELLOW}Project:${NC} ${RALPH_PROJECT_DIR}  ${DIM}|${NC}  ${YELLOW}State:${NC} .ralph/"
 echo ""
 
 # ── Pre-flight Checks ────────────────────────────────────────────

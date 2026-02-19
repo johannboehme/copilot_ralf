@@ -14,6 +14,12 @@ ralph_mktemp() {
 }
 
 _ralph_cleanup() {
+    # Stop output peek if running
+    if [[ -n "${RALPH_PEEK_PID:-}" ]]; then
+        kill "${RALPH_PEEK_PID}" 2>/dev/null || true
+        wait "${RALPH_PEEK_PID}" 2>/dev/null || true
+        RALPH_PEEK_PID=""
+    fi
     rm -f "${RALPH_TMPFILES[@]}" 2>/dev/null || true
 }
 trap '_ralph_cleanup' EXIT
@@ -110,7 +116,8 @@ run_copilot_yolo_with_timeout() {
 # ── Colors (respects NO_COLOR: https://no-color.org/) ────────────
 
 if [[ -n "${NO_COLOR:-}" ]] || [[ ! -t 1 ]]; then
-    RED='' GREEN='' YELLOW='' BLUE='' CYAN='' DIM='' NC=''
+    RED='' GREEN='' YELLOW='' BLUE='' CYAN='' DIM='' BOLD='' MAGENTA='' NC=''
+    RALPH_COLOR=false
 else
     RED='\033[0;31m'
     GREEN='\033[0;32m'
@@ -118,7 +125,16 @@ else
     BLUE='\033[0;34m'
     CYAN='\033[0;36m'
     DIM='\033[2m'
+    BOLD='\033[1m'
+    MAGENTA='\033[0;35m'
     NC='\033[0m'
+    RALPH_COLOR=true
+fi
+
+# Interactive terminal detection (used for output peek)
+RALPH_INTERACTIVE=false
+if [[ -t 1 ]] && [[ -t 2 ]]; then
+    RALPH_INTERACTIVE=true
 fi
 
 # ── Print Helpers ─────────────────────────────────────────────────
@@ -128,6 +144,197 @@ success() { echo -e "${GREEN}$*${NC}"; }
 warn()    { echo -e "${YELLOW}$*${NC}"; }
 error()   { echo -e "${RED}$*${NC}" >&2; }
 dim()     { echo -e "${DIM}$*${NC}"; }
+
+# ── Display Functions ────────────────────────────────────────────
+
+format_duration() {
+    local secs="$1"
+    if [[ "${secs}" -ge 60 ]]; then
+        echo "$((secs / 60))m $((secs % 60))s"
+    else
+        echo "${secs}s"
+    fi
+}
+
+print_progress_bar() {
+    local done="$1"
+    local total="$2"
+    local width="${3:-24}"
+
+    if [[ "${total}" -eq 0 ]]; then
+        echo "  [no tasks]"
+        return
+    fi
+
+    local pct=$((done * 100 / total))
+    local filled=$((done * width / total))
+    local empty=$((width - filled))
+
+    # Color based on progress
+    local bar_color="${YELLOW}"
+    if [[ "${pct}" -ge 75 ]]; then
+        bar_color="${GREEN}"
+    elif [[ "${pct}" -ge 40 ]]; then
+        bar_color="${CYAN}"
+    fi
+
+    local bar=""
+    local i
+    for ((i = 0; i < filled; i++)); do bar+="█"; done
+    for ((i = 0; i < empty; i++)); do bar+="░"; done
+
+    echo -e "  ${bar_color}[${bar}]${NC} ${done}/${total} (${pct}%)"
+}
+
+get_next_pending_task() {
+    local prd_file="${1:-${RALPH_PRD}}"
+    local title
+    title=$(grep -m1 '^\- \[ \]' "${prd_file}" 2>/dev/null \
+        | sed 's/^- \[ \] \*\*\(.*\)\*\*.*/\1/' \
+        | sed 's/\[effort:.*\]//' \
+        | xargs 2>/dev/null) || true
+    # Truncate to ~45 chars
+    if [[ ${#title} -gt 45 ]]; then
+        title="${title:0:42}..."
+    fi
+    echo "${title}"
+}
+
+print_dashboard() {
+    local iteration="$1"
+    local max_iterations="$2"
+    local model="$3"
+    local stagnant_count="$4"
+    local done="$5"
+    local total="$6"
+    local task_name="$7"
+    local elapsed="$8"
+    local timeout="$9"
+
+    local escalated=""
+    if [[ "${model}" != "${LOOP_MODEL:-}" ]] && [[ "${stagnant_count}" -gt 0 ]]; then
+        escalated=" ${MAGENTA}[ESCALATED]${NC}"
+    fi
+
+    local stag_display=""
+    if [[ "${stagnant_count}" -gt 0 ]]; then
+        stag_display="  |  ${YELLOW}stagnant: ${stagnant_count}${NC}"
+    fi
+
+    echo -e "${CYAN}┌─────────────────────────────────────────────────────────┐${NC}"
+    echo -e "${CYAN}│${NC} ${BOLD}Iteration ${iteration}/${max_iterations}${NC}  |  ${model}${escalated}${stag_display}"
+    echo -e "${CYAN}│${NC}"
+    print_progress_bar "${done}" "${total}"
+    echo -e "${CYAN}│${NC}"
+    if [[ -n "${task_name}" ]]; then
+        echo -e "${CYAN}│${NC} Task: ${BOLD}${task_name}${NC}"
+    fi
+    echo -e "${CYAN}│${NC} Elapsed: $(format_duration "${elapsed}")  |  Timeout: $(format_duration "${timeout}")"
+    echo -e "${CYAN}└─────────────────────────────────────────────────────────┘${NC}"
+}
+
+print_verdict() {
+    local verdict="$1"
+    local task_name="$2"
+    local duration="$3"
+    local detail="${4:-}"
+
+    local icon color label
+    case "${verdict}" in
+        verified)
+            icon="✓" color="${GREEN}" label="VERIFIED" ;;
+        completed)
+            icon="✓" color="${GREEN}" label="COMPLETED" ;;
+        partial)
+            icon="◐" color="${YELLOW}" label="PARTIAL" ;;
+        timeout)
+            icon="⏱" color="${RED}" label="TIMEOUT" ;;
+        blocked)
+            icon="⊘" color="${RED}" label="BLOCKED" ;;
+        suspicious)
+            icon="✗" color="${YELLOW}" label="SUSPICIOUS" ;;
+        incomplete)
+            icon="◐" color="${YELLOW}" label="INCOMPLETE" ;;
+        no-progress)
+            icon="✗" color="${RED}" label="NO PROGRESS" ;;
+        *)
+            icon="?" color="${DIM}" label="${verdict}" ;;
+    esac
+
+    echo ""
+    echo -e "  ${color}${icon} ${label}: ${task_name}${NC} [$(format_duration "${duration}")]"
+    if [[ -n "${detail}" ]]; then
+        echo -e "    ${DIM}${detail}${NC}"
+    fi
+}
+
+# Output peek: shows last few lines of model output in real-time
+RALPH_PEEK_PID=""
+
+start_output_peek() {
+    local output_file="$1"
+
+    # Only in interactive terminals with color support
+    if [[ "${RALPH_INTERACTIVE}" != true ]] || [[ "${RALPH_COLOR}" != true ]]; then
+        return
+    fi
+
+    # Spinner chars
+    (
+        local spin_chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+        local spin_idx=0
+        local prev_lines=""
+        while true; do
+            sleep 2
+            if [[ ! -f "${output_file}" ]]; then
+                continue
+            fi
+
+            # Get last 3 non-empty lines, strip ANSI
+            local lines
+            lines=$(sed $'s/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\x1b\]0;[^\x07]*\x07//g' "${output_file}" 2>/dev/null \
+                | grep -v '^$' | tail -3 2>/dev/null) || true
+
+            if [[ -z "${lines}" ]] || [[ "${lines}" == "${prev_lines}" ]]; then
+                continue
+            fi
+            prev_lines="${lines}"
+
+            local s="${spin_chars:spin_idx:1}"
+            spin_idx=$(( (spin_idx + 1) % ${#spin_chars} ))
+
+            # Move up and clear previous peek (3 lines + header)
+            printf '\033[4A\033[J' 2>/dev/null || true
+            echo -e "  ${DIM}${s} Agent output:${NC}"
+            while IFS= read -r line; do
+                # Truncate long lines
+                if [[ ${#line} -gt 70 ]]; then
+                    line="${line:0:67}..."
+                fi
+                echo -e "    ${DIM}${line}${NC}"
+            done <<< "${lines}"
+        done
+    ) &
+    RALPH_PEEK_PID=$!
+
+    # Print placeholder lines that the peek loop will overwrite
+    echo -e "  ${DIM}⠋ Agent output:${NC}"
+    echo -e "    ${DIM}(waiting for output...)${NC}"
+    echo ""
+    echo ""
+}
+
+stop_output_peek() {
+    if [[ -n "${RALPH_PEEK_PID}" ]]; then
+        kill "${RALPH_PEEK_PID}" 2>/dev/null || true
+        wait "${RALPH_PEEK_PID}" 2>/dev/null || true
+        RALPH_PEEK_PID=""
+        # Clear peek lines
+        if [[ "${RALPH_INTERACTIVE}" == true ]] && [[ "${RALPH_COLOR}" == true ]]; then
+            printf '\033[4A\033[J' 2>/dev/null || true
+        fi
+    fi
+}
 
 # ── .ralph/ Directory Management ──────────────────────────────────
 
@@ -577,28 +784,63 @@ print_summary() {
     local blocked
     blocked=$(count_blocked)
     local total_time=$((end_time - start_time))
-    local minutes=$((total_time / 60))
-    local seconds=$((total_time % 60))
 
     local avg_time="n/a"
     if [[ "${completed}" -gt 0 ]]; then
         local avg=$((total_time / completed))
-        avg_time="${avg}s"
+        avg_time="$(format_duration "${avg}")"
     fi
 
     local failed_count
     failed_count=$(get_failed_task_count)
 
+    local total_tasks=$((completed + pending + blocked))
+
+    # Banner color based on outcome
+    local banner_color="${YELLOW}"
+    if [[ "${pending}" -eq 0 ]] && [[ "${blocked}" -eq 0 ]]; then
+        banner_color="${GREEN}"
+    elif [[ "${completed}" -eq 0 ]]; then
+        banner_color="${RED}"
+    fi
+
     echo ""
-    echo -e "${BLUE}╔══════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║       Ralph Loop — Summary           ║${NC}"
-    echo -e "${BLUE}╚══════════════════════════════════════╝${NC}"
-    echo -e "  Iterations:        ${total_iterations}"
-    echo -e "  Tasks completed:   ${GREEN}${completed}${NC}"
-    echo -e "  Tasks pending:     ${YELLOW}${pending}${NC}"
-    echo -e "  Tasks blocked:     ${RED}${blocked}${NC}"
-    echo -e "  Failed attempts:   ${failed_count}"
-    echo -e "  Total time:        ${minutes}m ${seconds}s"
-    echo -e "  Avg time/task:     ${avg_time}"
-    echo -e "  Progress log:      ${RALPH_PROGRESS}"
+    echo -e "${banner_color}╔══════════════════════════════════════╗${NC}"
+    echo -e "${banner_color}║       Ralph Loop — Summary           ║${NC}"
+    echo -e "${banner_color}╚══════════════════════════════════════╝${NC}"
+    echo ""
+    print_progress_bar "${completed}" "${total_tasks}"
+    echo ""
+    echo -e "  ${GREEN}Completed:${NC}  ${completed}    ${YELLOW}Pending:${NC} ${pending}    ${RED}Blocked:${NC} ${blocked}    ${DIM}Failed:${NC} ${failed_count}"
+    echo -e "  Iterations: ${total_iterations}  |  Duration: $(format_duration "${total_time}")  |  Avg/task: ${avg_time}"
+    echo ""
+
+    # List completed tasks
+    local done_tasks
+    done_tasks=$(grep -i '^\- \[x\]' "${RALPH_PRD}" 2>/dev/null \
+        | sed 's/^- \[[xX]\] \*\*\(.*\)\*\*.*/\1/' \
+        | sed 's/\[effort:.*\]//' || true)
+    if [[ -n "${done_tasks}" ]]; then
+        echo -e "  ${GREEN}Completed:${NC}"
+        while IFS= read -r t; do
+            t=$(echo "${t}" | xargs 2>/dev/null)
+            echo -e "    ${GREEN}✓${NC} ${t}"
+        done <<< "${done_tasks}"
+    fi
+
+    # List pending tasks
+    local open_tasks
+    open_tasks=$(grep '^\- \[ \]' "${RALPH_PRD}" 2>/dev/null \
+        | sed 's/^- \[ \] \*\*\(.*\)\*\*.*/\1/' \
+        | sed 's/\[effort:.*\]//' || true)
+    if [[ -n "${open_tasks}" ]]; then
+        echo -e "  ${YELLOW}Remaining:${NC}"
+        while IFS= read -r t; do
+            t=$(echo "${t}" | xargs 2>/dev/null)
+            echo -e "    ${DIM}○${NC} ${t}"
+        done <<< "${open_tasks}"
+    fi
+
+    echo ""
+    echo -e "  ${DIM}Progress log: ${RALPH_PROGRESS}${NC}"
 }
