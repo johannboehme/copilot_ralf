@@ -1013,8 +1013,9 @@ detect_repeated_output() {
     if [[ ${#RALPH_OUTPUT_HASHES[@]} -lt 2 ]]; then
         return 1
     fi
-    local last="${RALPH_OUTPUT_HASHES[-1]}"
-    local prev="${RALPH_OUTPUT_HASHES[-2]}"
+    local len=${#RALPH_OUTPUT_HASHES[@]}
+    local last="${RALPH_OUTPUT_HASHES[$((len-1))]}"
+    local prev="${RALPH_OUTPUT_HASHES[$((len-2))]}"
     if [[ "${last}" == "${prev}" ]]; then
         return 0
     fi
