@@ -122,6 +122,7 @@ preflight_check "${RALPH_PROJECT_DIR}" || {
     error "Pre-flight checks failed. Fix the issues above before continuing."
     exit 1
 }
+export RALPH_PREFLIGHT_DONE=1
 echo ""
 
 # ── Phase 1: Planning ────────────────────────────────────────────

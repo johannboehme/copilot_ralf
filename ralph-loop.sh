@@ -108,8 +108,10 @@ if ! validate_prd "${RALPH_PRD}"; then
     exit 1
 fi
 
-# Pre-flight checks
-preflight_check "${PROJECT_DIR}" || exit 1
+# Pre-flight checks (skip if already done by ralph.sh)
+if [[ "${RALPH_PREFLIGHT_DONE:-}" != "1" ]]; then
+    preflight_check "${PROJECT_DIR}" || exit 1
+fi
 
 # ── Prompt Builders ───────────────────────────────────────────────
 
