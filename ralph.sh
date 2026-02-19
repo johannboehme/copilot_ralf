@@ -25,6 +25,7 @@ RALPH_VERBOSE="${RALPH_VERBOSE:-false}"
 RALPH_HEALTHCHECK_ENABLED="${RALPH_HEALTHCHECK_ENABLED:-true}"
 RALPH_HEALTHCHECK_TIMEOUT="${RALPH_HEALTHCHECK_TIMEOUT:-120}"
 RALPH_CHECKPOINT_INTERVAL="${RALPH_CHECKPOINT_INTERVAL:-4}"
+RALPH_CONTAINER_FLAGS="${RALPH_CONTAINER_FLAGS:---playwright}"
 
 # ── Usage ─────────────────────────────────────────────────────────
 
@@ -63,6 +64,7 @@ Environment variables:
   RALPH_HEALTHCHECK_ENABLED Enable post-task healthcheck (default: true)
   RALPH_HEALTHCHECK_TIMEOUT Healthcheck timeout in seconds (default: 120)
   RALPH_CHECKPOINT_INTERVAL Insert checkpoint tasks every N tasks (default: 4)
+  RALPH_CONTAINER_FLAGS     Extra flags for copilot_yolo (default: --playwright)
 
 Examples:
   $0 "Build a CLI tool for managing TODO lists"
@@ -121,6 +123,7 @@ export RALPH_VERBOSE
 export RALPH_HEALTHCHECK_ENABLED
 export RALPH_HEALTHCHECK_TIMEOUT
 export RALPH_CHECKPOINT_INTERVAL
+export RALPH_CONTAINER_FLAGS
 
 init_ralph_dir "${RALPH_PROJECT_DIR}"
 

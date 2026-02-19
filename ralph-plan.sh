@@ -13,6 +13,7 @@ source "${SCRIPT_DIR}/ralph-lib.sh"
 # Configuration
 PROJECT_DIR="${RALPH_PROJECT_DIR:-.}"
 PLAN_MODEL="${RALPH_PLAN_MODEL:-claude-sonnet-4.5}"
+RALPH_CONTAINER_FLAGS="${RALPH_CONTAINER_FLAGS:---playwright}"
 
 init_ralph_dir "${PROJECT_DIR}"
 

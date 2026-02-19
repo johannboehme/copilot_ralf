@@ -41,12 +41,18 @@ _ralph_load_copilot() {
 run_copilot_yolo() {
     _ralph_load_copilot
 
+    # Prepend container flags (e.g. --playwright) if configured
+    local extra_flags=()
+    if [[ -n "${RALPH_CONTAINER_FLAGS:-}" ]]; then
+        read -ra extra_flags <<< "${RALPH_CONTAINER_FLAGS}"
+    fi
+
     # If we already have a TTY, call directly
     if [[ -t 0 ]]; then
         if [[ -n "${RALPH_OUTPUT_FILE:-}" ]]; then
-            copilot_yolo "$@" > "${RALPH_OUTPUT_FILE}" 2>&1
+            copilot_yolo "${extra_flags[@]}" "$@" > "${RALPH_OUTPUT_FILE}" 2>&1
         else
-            copilot_yolo "$@"
+            copilot_yolo "${extra_flags[@]}" "$@"
         fi
         return $?
     fi
@@ -59,6 +65,9 @@ run_copilot_yolo() {
         echo '#!/usr/bin/env bash'
         echo 'source ~/.copilot_here.sh 2>/dev/null'
         printf 'copilot_yolo'
+        for flag in "${extra_flags[@]}"; do
+            printf ' %q' "$flag"
+        done
         for arg in "$@"; do
             printf ' %q' "$arg"
         done
