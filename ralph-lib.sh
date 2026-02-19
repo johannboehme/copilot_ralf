@@ -919,9 +919,13 @@ run_healthcheck() {
     local commands
     commands=$(parse_verify_commands "${agents_file}")
 
-    # No verify block — silently pass (graceful degradation)
+    # No verify block — try auto-detection as fallback
     if [[ -z "${commands}" ]]; then
-        return 0
+        commands=$(auto_detect_verify_commands "${project_dir}")
+        if [[ -z "${commands}" ]]; then
+            return 0
+        fi
+        dim "  Healthcheck: auto-detected verify commands"
     fi
 
     local healthcheck_output=""
@@ -1178,6 +1182,205 @@ get_slowest_task() {
 
     if [[ ${max_duration} -gt 0 ]]; then
         echo "${max_task} ($(format_duration "${max_duration}"))"
+    fi
+}
+
+# ── Auto-detect Verify Commands ──────────────────────────────────
+
+auto_detect_verify_commands() {
+    local project_dir="$1"
+    local commands=""
+
+    if [[ -f "${project_dir}/package.json" ]]; then
+        # Node.js project
+        if grep -q '"test"' "${project_dir}/package.json" 2>/dev/null; then
+            commands+="npm test"$'\n'
+        fi
+        if grep -q '"build"' "${project_dir}/package.json" 2>/dev/null; then
+            commands+="npm run build"$'\n'
+        fi
+        if grep -q '"lint"' "${project_dir}/package.json" 2>/dev/null; then
+            commands+="npm run lint"$'\n'
+        fi
+    elif [[ -f "${project_dir}/requirements.txt" ]] || [[ -f "${project_dir}/pyproject.toml" ]] || [[ -f "${project_dir}/setup.py" ]]; then
+        # Python project
+        if [[ -f "${project_dir}/pytest.ini" ]] || [[ -f "${project_dir}/pyproject.toml" ]] || [[ -d "${project_dir}/tests" ]]; then
+            commands+="python -m pytest"$'\n'
+        fi
+        if [[ -f "${project_dir}/pyproject.toml" ]] && grep -q 'ruff' "${project_dir}/pyproject.toml" 2>/dev/null; then
+            commands+="ruff check ."$'\n'
+        fi
+    elif [[ -f "${project_dir}/go.mod" ]]; then
+        commands+="go build ./..."$'\n'
+        commands+="go test ./..."$'\n'
+    elif [[ -f "${project_dir}/Cargo.toml" ]]; then
+        commands+="cargo build"$'\n'
+        commands+="cargo test"$'\n'
+    fi
+
+    echo "${commands}"
+}
+
+# ── QA Agent Functions ───────────────────────────────────────────
+
+build_qa_prompt() {
+    cat <<'QA_PROMPT'
+You are an independent QA agent. Your job is to TEST — not implement, not fix.
+
+## Your Mission
+
+1. Read .ralph/prd.md and identify all tasks marked [x] (completed)
+2. For EACH completed task, verify it actually works by testing the acceptance criteria
+3. Use the appropriate tool for each test:
+   - File/config tasks → check file exists, has expected content (bash, cat, jq)
+   - API endpoints → start the server, test with curl (check status codes, response shapes)
+   - UI features → start the server, use Playwright to navigate and verify
+   - Build/test tasks → run the commands and check they pass
+4. Report your findings
+
+## Testing Approach
+
+- Start the dev server if any task involves API or UI
+- For API tests: use curl with -sf flag, check response codes and JSON shape
+- For UI tests: use Playwright to navigate, check elements exist, forms work
+- For file tests: check existence, content, valid syntax
+- Test FUNCTIONALITY, not just existence — click buttons, submit forms, call endpoints
+- Be THOROUGH but FAIR — test what the acceptance criteria ask for
+
+## Output Format
+
+For EACH completed task, output exactly one line:
+
+<ralph>QA task="Task Title" status="pass"</ralph>
+or
+<ralph>QA task="Task Title" status="fail" reason="Description of what doesn't work"</ralph>
+
+At the end, output a summary:
+<ralph>QA_DONE passed=N failed=M</ralph>
+
+## Rules
+
+- Do NOT modify any project files
+- Do NOT fix any bugs you find
+- Do NOT mark/unmark tasks in the PRD
+- ONLY test and report
+- If you can't test a task (e.g., no server setup yet), mark it as pass
+- If the dev server fails to start, that's a fail for ALL server-dependent tasks
+QA_PROMPT
+}
+
+run_qa_agent() {
+    local project_dir="$1"
+    local timeout="${2:-300}"
+
+    local qa_prompt
+    qa_prompt=$(build_qa_prompt)
+
+    local output
+    output=$(run_copilot_yolo_with_timeout "${timeout}" \
+        --model "${LOOP_MODEL:-gpt-4.1}" --no-pull \
+        -p "${qa_prompt}") || true
+
+    echo "${output}"
+}
+
+parse_qa_results() {
+    local qa_output="$1"
+
+    # Extract QA result lines
+    local results
+    results=$(echo "${qa_output}" | grep '<ralph>QA ' || true)
+
+    if [[ -z "${results}" ]]; then
+        echo "QA_PARSE_ERROR"
+        return 1
+    fi
+
+    # Parse each result
+    local passed=0 failed=0
+    local failed_tasks=""
+
+    while IFS= read -r line; do
+        local task status reason
+        task=$(echo "${line}" | sed -n 's/.*task="\([^"]*\)".*/\1/p')
+        status=$(echo "${line}" | sed -n 's/.*status="\([^"]*\)".*/\1/p')
+        reason=$(echo "${line}" | sed -n 's/.*reason="\([^"]*\)".*/\1/p')
+
+        if [[ "${status}" == "pass" ]]; then
+            passed=$((passed + 1))
+        elif [[ "${status}" == "fail" ]]; then
+            failed=$((failed + 1))
+            failed_tasks+="${task}|${reason}"$'\n'
+        fi
+    done <<< "${results}"
+
+    echo "QA_PASSED=${passed}"
+    echo "QA_FAILED=${failed}"
+    if [[ -n "${failed_tasks}" ]]; then
+        echo "QA_FAILURES:"
+        echo -n "${failed_tasks}"
+    fi
+
+    [[ ${failed} -eq 0 ]]
+}
+
+uncheck_task() {
+    local task_title="$1"
+    local escaped
+    escaped=$(printf '%s\n' "${task_title}" | sed 's/[[\.*^$()+?{|]/\\&/g')
+    if [[ "$(uname)" == "Darwin" ]]; then
+        sed -i '' "s/^\(- \)\[[xX]\]\(.*${escaped}.*\)/\1[ ]\2/" "${RALPH_PRD}"
+    else
+        sed -i "s/^\(- \)\[[xX]\]\(.*${escaped}.*\)/\1[ ]\2/" "${RALPH_PRD}"
+    fi
+}
+
+annotate_task_failure() {
+    local task_title="$1"
+    local reason="$2"
+    local escaped
+    escaped=$(printf '%s\n' "${task_title}" | sed 's/[[\.*^$()+?{|]/\\&/g')
+
+    # Find the task line number
+    local line_num
+    line_num=$(grep -n "${escaped}" "${RALPH_PRD}" | head -1 | cut -d: -f1)
+
+    if [[ -n "${line_num}" ]]; then
+        # Find the Acceptance: line for this task (within next 5 lines)
+        local acc_line
+        acc_line=$(sed -n "$((line_num+1)),$((line_num+5))p" "${RALPH_PRD}" | grep -n 'Acceptance:' | head -1 | cut -d: -f1)
+
+        if [[ -n "${acc_line}" ]]; then
+            local insert_at=$((line_num + acc_line))
+            if [[ "$(uname)" == "Darwin" ]]; then
+                sed -i '' "${insert_at}a\\
+  - QA-Failure: ${reason}" "${RALPH_PRD}"
+            else
+                sed -i "${insert_at}a\\
+  - QA-Failure: ${reason}" "${RALPH_PRD}"
+            fi
+        fi
+    fi
+}
+
+extract_task_files() {
+    local task_title="$1"
+    local prd_file="${2:-${RALPH_PRD}}"
+    local escaped
+    escaped=$(printf '%s\n' "${task_title}" | sed 's/[[\.*^$()+?{|]/\\&/g')
+
+    # Find the task line number
+    local line_num
+    line_num=$(grep -n "${escaped}" "${prd_file}" | head -1 | cut -d: -f1)
+
+    if [[ -n "${line_num}" ]]; then
+        # Look for Files: line within next 5 lines
+        sed -n "$((line_num+1)),$((line_num+5))p" "${prd_file}" \
+            | grep 'Files:' | head -1 \
+            | sed 's/.*Files: *//' \
+            | tr ',' '\n' \
+            | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+            | grep -v '^(none' || true
     fi
 }
 

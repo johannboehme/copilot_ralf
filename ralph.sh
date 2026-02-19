@@ -24,6 +24,8 @@ RALPH_TWO_PHASE="${RALPH_TWO_PHASE:-false}"
 RALPH_VERBOSE="${RALPH_VERBOSE:-false}"
 RALPH_HEALTHCHECK_ENABLED="${RALPH_HEALTHCHECK_ENABLED:-true}"
 RALPH_HEALTHCHECK_TIMEOUT="${RALPH_HEALTHCHECK_TIMEOUT:-120}"
+RALPH_REGRESSION_ENABLED="${RALPH_REGRESSION_ENABLED:-true}"
+RALPH_REGRESSION_TIMEOUT="${RALPH_REGRESSION_TIMEOUT:-300}"
 RALPH_CHECKPOINT_INTERVAL="${RALPH_CHECKPOINT_INTERVAL:-4}"
 RALPH_CONTAINER_FLAGS="${RALPH_CONTAINER_FLAGS:---playwright}"
 
@@ -46,6 +48,7 @@ Options:
   --two-phase               Use two-phase execution (select + implement)
   --verbose                 Log prompts and outputs to .ralph/debug/
   --no-healthcheck          Disable post-task healthcheck
+  --no-regression           Disable QA agent at checkpoints
   --checkpoint-interval <n> Insert checkpoint tasks every N tasks (default: 4)
   --no-checkpoints          Don't insert checkpoint tasks into PRD
   --plan-only               Only generate the PRD, don't execute
@@ -63,6 +66,8 @@ Environment variables:
   RALPH_VERBOSE             Log prompts/outputs to .ralph/debug/ (default: false)
   RALPH_HEALTHCHECK_ENABLED Enable post-task healthcheck (default: true)
   RALPH_HEALTHCHECK_TIMEOUT Healthcheck timeout in seconds (default: 120)
+  RALPH_REGRESSION_ENABLED  Enable QA agent at checkpoints (default: true)
+  RALPH_REGRESSION_TIMEOUT  QA agent timeout in seconds (default: 300)
   RALPH_CHECKPOINT_INTERVAL Insert checkpoint tasks every N tasks (default: 4)
   RALPH_CONTAINER_FLAGS     Extra flags for copilot_yolo (default: --playwright)
 
@@ -94,6 +99,7 @@ while [[ $# -gt 0 ]]; do
         --two-phase) RALPH_TWO_PHASE=true; shift ;;
         --verbose) RALPH_VERBOSE=true; shift ;;
         --no-healthcheck) RALPH_HEALTHCHECK_ENABLED=false; shift ;;
+        --no-regression) RALPH_REGRESSION_ENABLED=false; shift ;;
         --checkpoint-interval) RALPH_CHECKPOINT_INTERVAL="$2"; shift 2 ;;
         --no-checkpoints) RALPH_CHECKPOINT_INTERVAL=0; shift ;;
         --plan-only) PLAN_ONLY=true; shift ;;
@@ -122,6 +128,8 @@ export RALPH_TWO_PHASE
 export RALPH_VERBOSE
 export RALPH_HEALTHCHECK_ENABLED
 export RALPH_HEALTHCHECK_TIMEOUT
+export RALPH_REGRESSION_ENABLED
+export RALPH_REGRESSION_TIMEOUT
 export RALPH_CHECKPOINT_INTERVAL
 export RALPH_CONTAINER_FLAGS
 
@@ -196,6 +204,7 @@ LOOP_ARGS=(-m "${RALPH_LOOP_MODEL}" -p "${RALPH_PROJECT_DIR}" -a "${RALPH_MAX_TA
 [[ "${RALPH_SKIP_HOOKS}" == true ]] && LOOP_ARGS+=(--skip-hooks)
 [[ "${RALPH_TWO_PHASE}" == true ]] && LOOP_ARGS+=(--two-phase)
 [[ "${RALPH_HEALTHCHECK_ENABLED}" == false ]] && LOOP_ARGS+=(--no-healthcheck)
+[[ "${RALPH_REGRESSION_ENABLED}" == false ]] && LOOP_ARGS+=(--no-regression)
 
 "${SCRIPT_DIR}/ralph-loop.sh" "${LOOP_ARGS[@]}"
 

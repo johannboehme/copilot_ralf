@@ -30,6 +30,8 @@ RALPH_CONTAINER_FLAGS="${RALPH_CONTAINER_FLAGS:---playwright}"
 VERBOSE="${RALPH_VERBOSE:-false}"
 HEALTHCHECK_ENABLED="${RALPH_HEALTHCHECK_ENABLED:-true}"
 HEALTHCHECK_TIMEOUT="${RALPH_HEALTHCHECK_TIMEOUT:-120}"
+REGRESSION_ENABLED="${RALPH_REGRESSION_ENABLED:-true}"
+REGRESSION_TIMEOUT="${RALPH_REGRESSION_TIMEOUT:-300}"
 
 init_ralph_dir "${PROJECT_DIR}"
 init_learnings
@@ -55,6 +57,7 @@ Options:
   --two-phase               Use two-phase execution (select task, then implement)
   --verbose                 Log prompts and outputs to .ralph/debug/
   --no-healthcheck          Disable post-task healthcheck
+  --no-regression           Disable QA agent at checkpoints
   --dry-run                 Show what would be done without executing
   -h, --help                Show this help message
 
@@ -70,6 +73,8 @@ Environment variables:
   RALPH_VERBOSE             Log prompts/outputs to .ralph/debug/ (default: false)
   RALPH_HEALTHCHECK_ENABLED Enable post-task healthcheck (default: true)
   RALPH_HEALTHCHECK_TIMEOUT Healthcheck timeout in seconds (default: 120)
+  RALPH_REGRESSION_ENABLED  Enable QA agent at checkpoints (default: true)
+  RALPH_REGRESSION_TIMEOUT  QA agent timeout in seconds (default: 300)
 EOF
 }
 
@@ -92,6 +97,7 @@ while [[ $# -gt 0 ]]; do
         --two-phase) TWO_PHASE=true; shift ;;
         --verbose) VERBOSE=true; shift ;;
         --no-healthcheck) HEALTHCHECK_ENABLED=false; shift ;;
+        --no-regression) REGRESSION_ENABLED=false; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
         -h|--help) usage; exit 0 ;;
         -*) error "Unknown option: $1"; usage; exit 1 ;;
@@ -151,6 +157,10 @@ build_static_prompt() {
 - Once done, mark the task as [x] in prd.md.
 - Do NOT modify progress.md — the loop manages that file.
 - Do NOT output the completion signal prematurely.
+- At every checkpoint, an independent QA agent tests ALL completed tasks.
+  If your implementation doesn't actually work, the task will be reopened
+  with a QA-Failure note describing what's broken. You must fix it.
+- If you see a "QA-Failure:" note on a task, address that specific issue.
 
 ## Completion Signal
 
@@ -356,7 +366,7 @@ echo -e "${BLUE}╚════════════════════�
 echo ""
 echo -e "  ${YELLOW}Model:${NC} ${LOOP_MODEL}  ${DIM}|${NC}  ${YELLOW}Escalation:${NC} ${PLAN_MODEL}"
 echo -e "  ${YELLOW}Limits:${NC} ${MAX_TASK_ATTEMPTS} attempts/task, ${MAX_STAGNANT} stagnant, $(format_duration "${TASK_TIMEOUT}")/task"
-echo -e "  ${YELLOW}Options:${NC} commit=${AUTO_COMMIT} two-phase=${TWO_PHASE} verbose=${VERBOSE} healthcheck=${HEALTHCHECK_ENABLED}"
+echo -e "  ${YELLOW}Options:${NC} commit=${AUTO_COMMIT} two-phase=${TWO_PHASE} verbose=${VERBOSE} healthcheck=${HEALTHCHECK_ENABLED} regression=${REGRESSION_ENABLED}"
 echo ""
 print_progress_bar "${INITIAL_DONE}" "${INITIAL_TOTAL}"
 echo ""
@@ -645,14 +655,12 @@ $(echo "${TASK_OUTPUT}" | tail -20)"
 
     elif [[ "${PROMISE_DONE}" == true ]] && [[ "${TASK_MARKED_DONE}" == true ]]; then
         if [[ "${HEALTHCHECK_PASSED}" == false ]]; then
-            # Downgrade: tests fail despite promise + PRD
+            # Downgrade: tests fail despite promise + PRD — revert instead of committing broken code
             print_verdict "healthcheck-failed" "${COMPLETED_TASK}" "${ITER_DURATION}" \
                 "promise + PRD marked but healthcheck failed"
             log_progress "${iteration}" "${COMPLETED_TASK}" "healthcheck-failed" \
                 "Verified signals but healthcheck failed" "${HC_OUTPUT}" "${ITER_DURATION}"
-            if [[ "${AUTO_COMMIT}" == true ]]; then
-                safe_commit "ralph: ${COMPLETED_TASK} (healthcheck failing)" "${SKIP_HOOKS}"
-            fi
+            safe_revert "${iteration}" "healthcheck failed"
             last_error_context="Healthcheck failed after completing '${COMPLETED_TASK}':
 ${HC_OUTPUT}"
             stagnant_count=$((stagnant_count + 1))
@@ -672,14 +680,12 @@ ${HC_OUTPUT}"
 
     elif [[ "${TASK_MARKED_DONE}" == true ]] && [[ "${PROMISE_DONE}" == false ]]; then
         if [[ "${HEALTHCHECK_PASSED}" == false ]]; then
-            # Downgrade: tests fail despite PRD mark
+            # Downgrade: tests fail despite PRD mark — revert instead of committing broken code
             print_verdict "healthcheck-failed" "${COMPLETED_TASK}" "${ITER_DURATION}" \
                 "PRD marked but healthcheck failed"
             log_progress "${iteration}" "${COMPLETED_TASK}" "healthcheck-failed" \
                 "PRD marked but healthcheck failed" "${HC_OUTPUT}" "${ITER_DURATION}"
-            if [[ "${AUTO_COMMIT}" == true ]]; then
-                safe_commit "ralph: ${COMPLETED_TASK} (healthcheck failing)" "${SKIP_HOOKS}"
-            fi
+            safe_revert "${iteration}" "healthcheck failed"
             last_error_context="Healthcheck failed after completing '${COMPLETED_TASK}':
 ${HC_OUTPUT}"
             stagnant_count=$((stagnant_count + 1))
@@ -739,6 +745,73 @@ ${HC_OUTPUT}"
             auto_block_task "${COMPLETED_TASK}"
         fi
         last_error_context="${ERROR_TAIL}"
+    fi
+
+    # ── File-change verification ──
+    # If a task was completed, check that expected files were actually modified
+    if [[ "${TASK_MARKED_DONE}" == true ]] && [[ "${COMPLETED_TASK}" != "unknown task" ]] && [[ "${COMPLETED_TASK}" != "initial setup" ]]; then
+        EXPECTED_FILES=$(extract_task_files "${COMPLETED_TASK}")
+        if [[ -n "${EXPECTED_FILES}" ]]; then
+            ACTUAL_CHANGES=$(git diff --name-only HEAD 2>/dev/null || true)
+            if [[ -z "${ACTUAL_CHANGES}" ]]; then
+                ACTUAL_CHANGES=$(git diff --cached --name-only 2>/dev/null || true)
+            fi
+            FILE_MATCH=false
+            while IFS= read -r expected_file; do
+                [[ -z "${expected_file}" ]] && continue
+                if echo "${ACTUAL_CHANGES}" | grep -qF "${expected_file}"; then
+                    FILE_MATCH=true
+                    break
+                fi
+            done <<< "${EXPECTED_FILES}"
+            if [[ "${FILE_MATCH}" == false ]] && [[ -n "${ACTUAL_CHANGES}" ]]; then
+                dim "    Note: None of the expected files ($(echo "${EXPECTED_FILES}" | tr '\n' ', ')) were in the changes"
+            fi
+        fi
+    fi
+
+    # ── QA Checkpoint ──
+    if [[ "${COMPLETED_TASK}" =~ Checkpoint.*Verification ]] && \
+       [[ "${REGRESSION_ENABLED}" == true ]]; then
+
+        info "  ╔═══ QA Checkpoint ═══╗"
+        info "  Running QA agent to verify all completed tasks..."
+
+        QA_OUTPUT=$(run_qa_agent "${PROJECT_DIR}" "${REGRESSION_TIMEOUT}")
+        QA_RESULTS=""
+        QA_EXIT=0
+        QA_RESULTS=$(parse_qa_results "${QA_OUTPUT}") || QA_EXIT=$?
+
+        if [[ ${QA_EXIT} -ne 0 ]] && [[ "${QA_RESULTS}" != "QA_PARSE_ERROR" ]]; then
+            # QA found failures
+            warn "  QA agent found regressions!"
+
+            # Parse failures and reopen tasks
+            echo "${QA_RESULTS}" | grep -A999 'QA_FAILURES:' | tail -n+2 | while IFS='|' read -r task reason; do
+                [[ -z "${task}" ]] && continue
+                warn "    ✗ ${task}: ${reason}"
+                uncheck_task "${task}"
+                annotate_task_failure "${task}" "${reason}"
+            done
+
+            # Revert the checkpoint commit
+            safe_revert "${iteration}" "QA checkpoint failed"
+
+            last_error_context="QA Checkpoint failed. These tasks did not pass verification:
+${QA_RESULTS}
+Fix these issues before proceeding."
+            stagnant_count=$((stagnant_count + 1))
+        elif [[ "${QA_RESULTS}" == "QA_PARSE_ERROR" ]]; then
+            warn "  QA agent output could not be parsed. Continuing without QA verification."
+        else
+            success "  QA: All completed tasks verified!"
+            info "  ${QA_RESULTS}"
+            if [[ "${AUTO_COMMIT}" == true ]]; then
+                safe_commit "ralph: checkpoint passed" "${SKIP_HOOKS}"
+            fi
+        fi
+
+        info "  ╚═════════════════════╝"
     fi
 
     # ── Post-iteration PRD validation ──

@@ -181,6 +181,13 @@ else
     warn "  PRD has issues (see above). You may want to edit it before running the loop."
 fi
 
+# Warn about large PRDs
+PRD_TASK_COUNT=$(grep -c '^\- \[ \]' "${RALPH_PRD}" 2>/dev/null || echo "0")
+if [[ "${PRD_TASK_COUNT}" -gt 15 ]]; then
+    warn "  PRD has ${PRD_TASK_COUNT} tasks (>15). Consider breaking the project into phases"
+    warn "  or reducing scope. Large task lists increase stagnation risk."
+fi
+
 # ── Initialize State Files ────────────────────────────────────────
 
 init_progress
