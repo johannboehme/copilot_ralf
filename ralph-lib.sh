@@ -2,6 +2,22 @@
 # ralph-lib.sh — Shared library for the Ralph Loop
 # Source this file from other ralph scripts: source "$(dirname "$0")/ralph-lib.sh"
 
+# ── Tmpfile Cleanup ──────────────────────────────────────────────
+
+RALPH_TMPFILES=()
+
+ralph_mktemp() {
+    local f
+    f=$(mktemp)
+    RALPH_TMPFILES+=("$f")
+    echo "$f"
+}
+
+_ralph_cleanup() {
+    rm -f "${RALPH_TMPFILES[@]}" 2>/dev/null || true
+}
+trap '_ralph_cleanup' EXIT
+
 # ── Load copilot_here shell functions if not already available ────
 # copilot_here.sh uses unbound variables internally, so we must ensure
 # nounset is off both when sourcing and when calling its functions.
@@ -27,8 +43,8 @@ run_copilot_yolo() {
 
     # No TTY available — use 'script' to allocate a PTY
     local argfile outfile
-    argfile=$(mktemp)
-    outfile=$(mktemp)
+    argfile=$(ralph_mktemp)
+    outfile=$(ralph_mktemp)
 
     {
         echo '#!/usr/bin/env bash'
@@ -61,7 +77,7 @@ run_copilot_yolo_with_timeout() {
 
     # Run in background with watchdog
     local outfile
-    outfile=$(mktemp)
+    outfile=$(ralph_mktemp)
 
     run_copilot_yolo "$@" > "${outfile}" 2>&1 &
     local cmd_pid=$!
@@ -91,15 +107,19 @@ run_copilot_yolo_with_timeout() {
     return ${exit_code}
 }
 
-# ── Colors ────────────────────────────────────────────────────────
+# ── Colors (respects NO_COLOR: https://no-color.org/) ────────────
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-DIM='\033[2m'
-NC='\033[0m'
+if [[ -n "${NO_COLOR:-}" ]] || [[ ! -t 1 ]]; then
+    RED='' GREEN='' YELLOW='' BLUE='' CYAN='' DIM='' NC=''
+else
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    CYAN='\033[0;36m'
+    DIM='\033[2m'
+    NC='\033[0m'
+fi
 
 # ── Print Helpers ─────────────────────────────────────────────────
 
@@ -127,10 +147,11 @@ init_ralph_dir() {
 
     mkdir -p "${RALPH_DIR}"
 
-    # Ensure .ralph state files are in .gitignore (but NOT prd.md)
+    # Add .ralph state files to .gitignore if it already exists
+    # (creating .gitignore is the responsibility of PRD Task 1, not Ralph itself)
     local gitignore="${project_dir}/.gitignore"
     if [[ -f "${gitignore}" ]]; then
-        for pattern in ".ralph/progress.md" ".ralph/failed-tasks.txt" ".ralph/config.env"; do
+        for pattern in ".ralph/progress.md" ".ralph/failed-tasks.txt" ".ralph/config.env" ".ralph/debug/"; do
             if ! grep -qF "${pattern}" "${gitignore}" 2>/dev/null; then
                 echo "${pattern}" >> "${gitignore}"
             fi
@@ -159,6 +180,9 @@ snapshot_git_state() {
 # Sensitive file patterns to never commit
 SENSITIVE_PATTERNS=('.env' '.env.*' '*.pem' '*.key' '*.p12' '*.pfx' '*.secret' '*credential*' '*secret*' 'id_rsa' 'id_ed25519')
 
+# Build artifact patterns to never commit
+BUILD_ARTIFACT_PATTERNS=('node_modules' '__pycache__' '.pytest_cache' 'dist' 'build' '.next' 'vendor' 'target' '.venv' 'venv' '*.pyc' '.tox' 'coverage' '.nyc_output' '.gradle' '.DS_Store')
+
 safe_commit() {
     local message="$1"
     local skip_hooks="${2:-false}"
@@ -171,16 +195,29 @@ safe_commit() {
     # Stage all changes
     git add -A 2>/dev/null || true
 
-    # Unstage sensitive files
+    # Unstage sensitive files (use -F for literal matching, fixes regex escape bug)
     local sensitive_found=false
     for pattern in "${SENSITIVE_PATTERNS[@]}"; do
-        if git diff --cached --name-only 2>/dev/null | grep -qiE "(^|/)${pattern}$"; then
+        if git diff --cached --name-only 2>/dev/null | grep -qiF "${pattern}"; then
             git reset HEAD -- "${pattern}" 2>/dev/null || true
             sensitive_found=true
         fi
     done
     if [[ "${sensitive_found}" == true ]]; then
         warn "  Sensitive files detected and excluded from commit"
+    fi
+
+    # Unstage build artifacts
+    local artifacts_found=false
+    for pattern in "${BUILD_ARTIFACT_PATTERNS[@]}"; do
+        if git diff --cached --name-only 2>/dev/null | grep -qF "/${pattern}" || \
+           git diff --cached --name-only 2>/dev/null | grep -qF "${pattern}/"; then
+            git reset HEAD -- "*${pattern}*" 2>/dev/null || true
+            artifacts_found=true
+        fi
+    done
+    if [[ "${artifacts_found}" == true ]]; then
+        warn "  Build artifacts detected and excluded from commit"
     fi
 
     # Check if there's anything staged
@@ -228,7 +265,7 @@ count_pending() {
 
 count_done() {
     local n
-    n=$(grep -c '^\- \[x\]' "${RALPH_PRD}" 2>/dev/null) || true
+    n=$(grep -ci '^\- \[x\]' "${RALPH_PRD}" 2>/dev/null) || true
     echo "${n:-0}"
 }
 
@@ -239,14 +276,31 @@ count_blocked() {
 }
 
 detect_completed_task() {
-    local newly_done
-    newly_done=$(git diff -- "${RALPH_PRD}" 2>/dev/null \
-        | grep '^+- \[x\]' \
-        | head -1 \
-        | sed 's/^+- \[x\] \*\*\(.*\)\*\*.*/\1/' \
-        | sed 's/\[effort:.*\]//' \
-        | xargs 2>/dev/null) || true
-    echo "${newly_done:-unknown task}"
+    local newly_done=""
+
+    # Try staged changes first (for commits), then unstaged
+    for diff_flag in "--cached" ""; do
+        newly_done=$(git diff ${diff_flag} -- "${RALPH_PRD}" 2>/dev/null \
+            | grep '^+- \[[xX]\]' \
+            | head -1 \
+            | sed 's/^+- \[[xX]\] \*\*\(.*\)\*\*.*/\1/' \
+            | sed 's/\[effort:.*\]//' \
+            | xargs 2>/dev/null) || true
+        if [[ -n "${newly_done}" ]]; then
+            break
+        fi
+    done
+
+    # Fallback: if PRD is new (iteration 1), use "initial setup" instead of "unknown task"
+    if [[ -z "${newly_done}" ]]; then
+        if ! git show HEAD:"${RALPH_PRD}" &>/dev/null 2>&1; then
+            echo "initial setup"
+        else
+            echo "unknown task"
+        fi
+    else
+        echo "${newly_done}"
+    fi
 }
 
 list_pending_tasks() {
@@ -341,6 +395,22 @@ log_progress() {
         fi
     fi
 
+    # Rotate if progress log exceeds 200 lines
+    local line_count
+    line_count=$(wc -l < "${RALPH_PROGRESS}" 2>/dev/null || echo "0")
+    if [[ "${line_count}" -gt 200 ]]; then
+        local archive="${RALPH_DIR}/progress-archive.md"
+        local keep_lines=50
+        local archive_lines=$((line_count - keep_lines))
+        if [[ ${archive_lines} -gt 0 ]]; then
+            head -"${archive_lines}" "${RALPH_PROGRESS}" >> "${archive}"
+            local tmp
+            tmp=$(ralph_mktemp)
+            tail -"${keep_lines}" "${RALPH_PROGRESS}" > "${tmp}"
+            mv "${tmp}" "${RALPH_PROGRESS}"
+        fi
+    fi
+
     # Append entry
     {
         echo ""
@@ -382,9 +452,9 @@ ${completed}
 "
     fi
 
-    # Failed/blocked tasks with reasons (important for avoidance)
+    # Failed/blocked tasks with reasons (last 3 failures only)
     local failures
-    failures=$(grep -B1 -A3 '^\- \*\*Status:\*\* \(incomplete\|no-progress\|timeout\|suspicious\|blocked\)' "${RALPH_PROGRESS}" 2>/dev/null || true)
+    failures=$(grep -B1 -A3 '^\- \*\*Status:\*\* \(incomplete\|no-progress\|timeout\|suspicious\|blocked\)' "${RALPH_PROGRESS}" 2>/dev/null | tail -20 || true)
     if [[ -n "${failures}" ]]; then
         summary+="Recent failures/issues:
 ${failures}
@@ -392,9 +462,9 @@ ${failures}
 "
     fi
 
-    # Last 3 full iteration blocks
+    # Last 5 full iteration blocks
     local recent
-    recent=$(awk '/^### Iteration /{n++} n>=(NR>0?n-2:1)' "${RALPH_PROGRESS}" 2>/dev/null | tail -30 || true)
+    recent=$(awk '/^### Iteration /{n++} n>=(NR>0?n-4:1)' "${RALPH_PROGRESS}" 2>/dev/null | tail -50 || true)
     if [[ -n "${recent}" ]]; then
         summary+="Last iterations:
 ${recent}"

@@ -26,6 +26,7 @@ TASK_TIMEOUT="${RALPH_TASK_TIMEOUT:-900}"
 AUTO_COMMIT="${RALPH_AUTO_COMMIT:-true}"
 SKIP_HOOKS="${RALPH_SKIP_HOOKS:-false}"
 TWO_PHASE="${RALPH_TWO_PHASE:-false}"
+VERBOSE="${RALPH_VERBOSE:-false}"
 
 init_ralph_dir "${PROJECT_DIR}"
 
@@ -48,6 +49,7 @@ Options:
   --no-commit               Don't auto-commit after each task
   --skip-hooks              Skip git pre-commit hooks on commits
   --two-phase               Use two-phase execution (select task, then implement)
+  --verbose                 Log prompts and outputs to .ralph/debug/
   --dry-run                 Show what would be done without executing
   -h, --help                Show this help message
 
@@ -60,6 +62,7 @@ Environment variables:
   RALPH_AUTO_COMMIT         Auto-commit after tasks (default: true)
   RALPH_SKIP_HOOKS          Skip pre-commit hooks (default: false)
   RALPH_TWO_PHASE           Two-phase task execution (default: false)
+  RALPH_VERBOSE             Log prompts/outputs to .ralph/debug/ (default: false)
 EOF
 }
 
@@ -80,6 +83,7 @@ while [[ $# -gt 0 ]]; do
         --no-commit) AUTO_COMMIT=false; shift ;;
         --skip-hooks) SKIP_HOOKS=true; shift ;;
         --two-phase) TWO_PHASE=true; shift ;;
+        --verbose) VERBOSE=true; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
         -h|--help) usage; exit 0 ;;
         -*) error "Unknown option: $1"; usage; exit 1 ;;
@@ -293,7 +297,13 @@ echo -e "${YELLOW}Stagnation limit:${NC} ${MAX_STAGNANT} iterations (+adaptive r
 echo -e "${YELLOW}Task timeout:${NC}     ${TASK_TIMEOUT}s"
 echo -e "${YELLOW}Auto-commit:${NC}      ${AUTO_COMMIT}"
 echo -e "${YELLOW}Two-phase:${NC}        ${TWO_PHASE}"
+echo -e "${YELLOW}Verbose:${NC}          ${VERBOSE}"
 echo ""
+
+# Create debug directory if verbose
+if [[ "${VERBOSE}" == true ]]; then
+    mkdir -p "${RALPH_DIR}/debug"
+fi
 
 LOOP_START_TIME=$(date +%s)
 iteration=0
@@ -332,13 +342,13 @@ while [[ ${iteration} -lt ${MAX_ITERATIONS} ]]; do
             warn "  Stagnation persists (2/${MAX_STAGNANT}). Forcing task skip."
         elif [[ ${stagnant_count} -eq "${MAX_STAGNANT}" ]]; then
             warn "  Stagnation critical (${MAX_STAGNANT}/${MAX_STAGNANT}). Escalating to smart model: ${PLAN_MODEL}"
-        elif [[ ${stagnant_count} -gt ${MAX_STAGNANT} ]]; then
+        elif [[ ${stagnant_count} -gt $((MAX_STAGNANT + 1)) ]]; then
             echo ""
             echo -e "${RED}╔══════════════════════════════════════╗${NC}"
             echo -e "${RED}║  CIRCUIT BREAKER: Stagnation halt    ║${NC}"
             echo -e "${RED}╚══════════════════════════════════════╝${NC}"
             echo ""
-            error "No task completed in ${stagnant_count} iterations (limit: ${MAX_STAGNANT}+1)."
+            error "No task completed in ${stagnant_count} iterations (limit: ${MAX_STAGNANT}+2)."
             echo ""
             echo -e "${YELLOW}Options:${NC}"
             echo "  1. Review ${RALPH_PRD} — break tasks into smaller subtasks"
@@ -370,6 +380,17 @@ while [[ ${iteration} -lt ${MAX_ITERATIONS} ]]; do
         ITER_END=$(date +%s)
         continue
     fi
+
+    # Parse effort level from the next pending task for timeout adjustment
+    EFFECTIVE_TIMEOUT="${TASK_TIMEOUT}"
+    NEXT_EFFORT=$(grep -m1 '^\- \[ \]' "${RALPH_PRD}" 2>/dev/null \
+        | grep -oE '\[effort: *(low|medium|high)\]' \
+        | sed 's/\[effort: *//;s/\]//' || true)
+    case "${NEXT_EFFORT}" in
+        low)    EFFECTIVE_TIMEOUT=$((TASK_TIMEOUT / 2)) ;;
+        high)   EFFECTIVE_TIMEOUT=$((TASK_TIMEOUT * 2)) ;;
+        *)      EFFECTIVE_TIMEOUT="${TASK_TIMEOUT}" ;;
+    esac
 
     # Snapshot git state before execution
     STATE_BEFORE=$(snapshot_git_state)
@@ -406,12 +427,18 @@ $(build_dynamic_prompt "${iteration}" "${PENDING}" "${DONE}" "${stagnant_count}"
 $(build_dynamic_prompt "${iteration}" "${PENDING}" "${DONE}" "${stagnant_count}" "${last_error_context}")"
     fi
 
+    # Log prompt if verbose
+    if [[ "${VERBOSE}" == true ]]; then
+        echo "${AGENT_PROMPT}" > "${RALPH_DIR}/debug/iter-${iteration}-prompt.txt"
+        dim "  [verbose] Prompt saved to .ralph/debug/iter-${iteration}-prompt.txt"
+    fi
+
     # Execute via copilot_yolo
     success "  Executing with ${CURRENT_MODEL}..."
 
-    TASK_OUTPUT_FILE=$(mktemp)
-    if [[ "${TASK_TIMEOUT}" -gt 0 ]]; then
-        run_copilot_yolo_with_timeout "${TASK_TIMEOUT}" --model "${CURRENT_MODEL}" --no-pull -p "${AGENT_PROMPT}" > "${TASK_OUTPUT_FILE}" 2>&1 || TASK_EXIT=$?
+    TASK_OUTPUT_FILE=$(ralph_mktemp)
+    if [[ "${EFFECTIVE_TIMEOUT}" -gt 0 ]]; then
+        run_copilot_yolo_with_timeout "${EFFECTIVE_TIMEOUT}" --model "${CURRENT_MODEL}" --no-pull -p "${AGENT_PROMPT}" > "${TASK_OUTPUT_FILE}" 2>&1 || TASK_EXIT=$?
     else
         run_copilot_yolo --model "${CURRENT_MODEL}" --no-pull -p "${AGENT_PROMPT}" > "${TASK_OUTPUT_FILE}" 2>&1 || TASK_EXIT=$?
     fi
@@ -420,6 +447,12 @@ $(build_dynamic_prompt "${iteration}" "${PENDING}" "${DONE}" "${stagnant_count}"
 
     ITER_END=$(date +%s)
     ITER_DURATION=$((ITER_END - ITER_START))
+
+    # Log output if verbose
+    if [[ "${VERBOSE}" == true ]]; then
+        echo "${TASK_OUTPUT}" > "${RALPH_DIR}/debug/iter-${iteration}-output.txt"
+        dim "  [verbose] Output saved to .ralph/debug/iter-${iteration}-output.txt (${ITER_DURATION}s)"
+    fi
 
     # ── Evaluate result using multiple signals ──
 
@@ -458,22 +491,22 @@ $(build_dynamic_prompt "${iteration}" "${PENDING}" "${DONE}" "${stagnant_count}"
     # Extract error context for failed iterations (last 30 lines)
     ERROR_TAIL=""
     if [[ "${PROMISE_DONE}" == false ]] && [[ "${TASK_MARKED_DONE}" == false ]]; then
-        ERROR_TAIL=$(echo "${TASK_OUTPUT}" | tail -30)
+        ERROR_TAIL=$(echo "${TASK_OUTPUT}" | tail -50)
     fi
 
     # ── Decision logic ──
 
     if [[ "${TIMED_OUT}" == true ]]; then
-        echo -e "${RED}  TIMEOUT: Task exceeded ${TASK_TIMEOUT}s limit${NC}"
+        echo -e "${RED}  TIMEOUT: Task exceeded ${EFFECTIVE_TIMEOUT}s limit${NC}"
         log_progress "${iteration}" "${COMPLETED_TASK}" "timeout" \
-            "Exceeded ${TASK_TIMEOUT}s. Files changed: ${FILES_CHANGED}" \
+            "Exceeded ${EFFECTIVE_TIMEOUT}s. Files changed: ${FILES_CHANGED}" \
             "${ERROR_TAIL}" "${ITER_DURATION}"
-        mark_task_failed "${COMPLETED_TASK}" "${iteration}" "timeout after ${TASK_TIMEOUT}s"
+        mark_task_failed "${COMPLETED_TASK}" "${iteration}" "timeout after ${EFFECTIVE_TIMEOUT}s"
         if [[ "${FILES_CHANGED}" == true ]]; then
             warn "  Partial work stashed (not destroyed)."
             safe_revert "${iteration}" "timeout"
         fi
-        last_error_context="Task timed out after ${TASK_TIMEOUT}s"
+        last_error_context="Task timed out after ${EFFECTIVE_TIMEOUT}s"
 
     elif [[ "${PROMISE_BLOCKED}" == true ]]; then
         echo -e "${RED}  BLOCKED: Agent reported all remaining tasks are blocked${NC}"
@@ -532,6 +565,20 @@ $(build_dynamic_prompt "${iteration}" "${PENDING}" "${DONE}" "${stagnant_count}"
             "No file changes, no signals" "${ERROR_TAIL}" "${ITER_DURATION}"
         mark_task_failed "${COMPLETED_TASK}" "${iteration}" "no progress"
         last_error_context="${ERROR_TAIL}"
+    fi
+
+    # ── Post-iteration PRD validation ──
+    if [[ -f "${RALPH_PRD}" ]]; then
+        local_pending=$(grep -c '^\- \[ \]' "${RALPH_PRD}" 2>/dev/null || echo "0")
+        local_done=$(grep -ci '^\- \[x\]' "${RALPH_PRD}" 2>/dev/null || echo "0")
+        if [[ "${local_pending}" -eq 0 ]] && [[ "${local_done}" -eq 0 ]]; then
+            warn "  PRD appears corrupt (no checkboxes found). Attempting recovery..."
+            if git checkout HEAD -- "${RALPH_PRD}" 2>/dev/null; then
+                success "  PRD restored from last commit."
+            else
+                warn "  Could not restore PRD — no previous commit available."
+            fi
+        fi
     fi
 
     echo ""

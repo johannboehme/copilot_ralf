@@ -80,15 +80,17 @@ Your task: Decompose the following user request into a structured, ordered check
 
 ## Rules for task decomposition:
 
-1. Each task must be ATOMIC — completable in a single focused coding session (max 15 minutes)
-2. Tasks must be ORDERED — later tasks can depend on earlier ones, never the reverse
-3. Each task must have MACHINE-VERIFIABLE acceptance criteria (e.g. "npm test passes", "file X exists", "endpoint returns 200")
-4. Each task should specify WHICH FILES to create or modify
-5. Include setup tasks (dependencies, config) before implementation tasks
-6. Include verification tasks (tests, linting) after implementation tasks
-7. Label each task with effort: [low], [medium], or [high]
-8. Bias toward MORE, SMALLER tasks over fewer, larger ones
-9. Never use vague acceptance criteria like "works correctly" or "looks good"
+1. Task 1 MUST be project setup including `.gitignore` with language-appropriate patterns, package init, and basic config
+2. Each task must be ATOMIC — completable in a single focused coding session (max 15 minutes)
+3. Tasks must be ORDERED — later tasks can depend on earlier ones, never the reverse
+4. Each task must have MACHINE-VERIFIABLE acceptance criteria with exact commands (e.g. "python main.py exits with code 0", "bash sysinfo.sh --json | jq . succeeds", "npm test passes")
+5. Each task should specify WHICH FILES to create or modify
+6. Include setup tasks (dependencies, config) before implementation tasks
+7. Include verification tasks (tests, linting) after implementation tasks
+8. Label each task with effort: [low], [medium], or [high]
+9. Group closely related work into single tasks (e.g., all CRUD operations for one entity = one task, not four separate tasks)
+10. Never use vague acceptance criteria like "works correctly" or "looks good"
+11. Ensure cross-platform compatibility where applicable (macOS + Linux)
 
 ## Output format:
 

@@ -21,6 +21,7 @@ RALPH_AUTO_COMMIT="${RALPH_AUTO_COMMIT:-true}"
 RALPH_SKIP_REVIEW="${RALPH_SKIP_REVIEW:-false}"
 RALPH_SKIP_HOOKS="${RALPH_SKIP_HOOKS:-false}"
 RALPH_TWO_PHASE="${RALPH_TWO_PHASE:-false}"
+RALPH_VERBOSE="${RALPH_VERBOSE:-false}"
 
 # ── Usage ─────────────────────────────────────────────────────────
 
@@ -39,6 +40,7 @@ Options:
   --skip-review             Skip PRD review step (fully autonomous)
   --skip-hooks              Skip git pre-commit hooks
   --two-phase               Use two-phase execution (select + implement)
+  --verbose                 Log prompts and outputs to .ralph/debug/
   --plan-only               Only generate the PRD, don't execute
   --loop-only               Only run the loop (PRD must already exist)
   -h, --help                Show this help message
@@ -51,6 +53,7 @@ Environment variables:
   RALPH_AUTO_COMMIT         Auto-commit after tasks (default: true)
   RALPH_SKIP_HOOKS          Skip pre-commit hooks (default: false)
   RALPH_TWO_PHASE           Two-phase execution (default: false)
+  RALPH_VERBOSE             Log prompts/outputs to .ralph/debug/ (default: false)
 
 Examples:
   $0 "Build a CLI tool for managing TODO lists"
@@ -78,6 +81,7 @@ while [[ $# -gt 0 ]]; do
         --skip-review) RALPH_SKIP_REVIEW=true; shift ;;
         --skip-hooks) RALPH_SKIP_HOOKS=true; shift ;;
         --two-phase) RALPH_TWO_PHASE=true; shift ;;
+        --verbose) RALPH_VERBOSE=true; shift ;;
         --plan-only) PLAN_ONLY=true; shift ;;
         --loop-only) LOOP_ONLY=true; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -101,6 +105,7 @@ export RALPH_MAX_ITERATIONS
 export RALPH_AUTO_COMMIT
 export RALPH_SKIP_HOOKS
 export RALPH_TWO_PHASE
+export RALPH_VERBOSE
 
 init_ralph_dir "${RALPH_PROJECT_DIR}"
 
