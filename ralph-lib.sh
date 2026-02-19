@@ -43,14 +43,17 @@ run_copilot_yolo() {
 
     # If we already have a TTY, call directly
     if [[ -t 0 ]]; then
-        copilot_yolo "$@"
+        if [[ -n "${RALPH_OUTPUT_FILE:-}" ]]; then
+            copilot_yolo "$@" > "${RALPH_OUTPUT_FILE}" 2>&1
+        else
+            copilot_yolo "$@"
+        fi
         return $?
     fi
 
     # No TTY available — use 'script' to allocate a PTY
-    local argfile outfile
+    local argfile
     argfile=$(ralph_mktemp)
-    outfile=$(ralph_mktemp)
 
     {
         echo '#!/usr/bin/env bash'
@@ -63,7 +66,18 @@ run_copilot_yolo() {
     } > "${argfile}"
     chmod +x "${argfile}"
 
-    # Run synchronously with script for PTY allocation
+    if [[ -n "${RALPH_OUTPUT_FILE:-}" ]]; then
+        # Stream directly to the monitored file (peek loop strips ANSI)
+        script -q "${RALPH_OUTPUT_FILE}" bash "${argfile}" >/dev/null 2>&1
+        local exit_code=$?
+        rm -f "${argfile}"
+        return ${exit_code}
+    fi
+
+    # Fallback: buffer internally and strip ANSI before emitting
+    local outfile
+    outfile=$(ralph_mktemp)
+
     script -q "${outfile}" bash "${argfile}" >/dev/null 2>&1
     local exit_code=$?
 
@@ -81,7 +95,33 @@ run_copilot_yolo_with_timeout() {
     local timeout_secs="$1"
     shift
 
-    # Run in background with watchdog
+    if [[ -n "${RALPH_OUTPUT_FILE:-}" ]]; then
+        # Streaming mode: run_copilot_yolo writes directly to RALPH_OUTPUT_FILE
+        run_copilot_yolo "$@" &
+        local cmd_pid=$!
+
+        # Watchdog: kill after timeout
+        (
+            sleep "${timeout_secs}" 2>/dev/null
+            kill "${cmd_pid}" 2>/dev/null
+        ) &
+        local watchdog_pid=$!
+
+        wait "${cmd_pid}" 2>/dev/null
+        local exit_code=$?
+
+        # Clean up watchdog
+        kill "${watchdog_pid}" 2>/dev/null 2>&1
+        wait "${watchdog_pid}" 2>/dev/null 2>&1
+
+        # If killed by signal, return 124 (timeout)
+        if [[ ${exit_code} -ge 137 ]]; then
+            return 124
+        fi
+        return ${exit_code}
+    fi
+
+    # Non-streaming: buffer internally
     local outfile
     outfile=$(ralph_mktemp)
 
@@ -285,7 +325,7 @@ start_output_peek() {
         local spin_idx=0
         local prev_lines=""
         while true; do
-            sleep 2
+            sleep 0.5
             if [[ ! -f "${output_file}" ]]; then
                 continue
             fi

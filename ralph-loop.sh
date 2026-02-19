@@ -460,15 +460,17 @@ $(build_dynamic_prompt "${iteration}" "${PENDING}" "${DONE}" "${stagnant_count}"
     echo -e "  ${DIM}Executing with ${CURRENT_MODEL}...${NC}"
 
     TASK_OUTPUT_FILE=$(ralph_mktemp)
+    export RALPH_OUTPUT_FILE="${TASK_OUTPUT_FILE}"
 
     start_output_peek "${TASK_OUTPUT_FILE}"
 
     if [[ "${EFFECTIVE_TIMEOUT}" -gt 0 ]]; then
-        run_copilot_yolo_with_timeout "${EFFECTIVE_TIMEOUT}" --model "${CURRENT_MODEL}" --no-pull -p "${AGENT_PROMPT}" > "${TASK_OUTPUT_FILE}" 2>&1 || TASK_EXIT=$?
+        run_copilot_yolo_with_timeout "${EFFECTIVE_TIMEOUT}" --model "${CURRENT_MODEL}" --no-pull -p "${AGENT_PROMPT}" || TASK_EXIT=$?
     else
-        run_copilot_yolo --model "${CURRENT_MODEL}" --no-pull -p "${AGENT_PROMPT}" > "${TASK_OUTPUT_FILE}" 2>&1 || TASK_EXIT=$?
+        run_copilot_yolo --model "${CURRENT_MODEL}" --no-pull -p "${AGENT_PROMPT}" || TASK_EXIT=$?
     fi
 
+    unset RALPH_OUTPUT_FILE
     stop_output_peek
 
     TASK_OUTPUT=$(cat "${TASK_OUTPUT_FILE}" 2>/dev/null)
