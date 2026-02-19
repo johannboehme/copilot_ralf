@@ -1,0 +1,41 @@
+# Project Agent Instructions
+
+> Copy this file to your project as `AGENTS.md` and customize it.
+> The Ralph Loop agent reads this file at the start of every iteration.
+
+## Project Overview
+
+<!-- Describe your project in 2-3 sentences -->
+
+## Tech Stack
+
+<!-- List frameworks, languages, and key dependencies -->
+
+## Code Conventions
+
+<!-- Describe naming conventions, file structure, patterns to follow -->
+
+## Verification Commands
+
+Run these after every change:
+
+```bash
+# Tests
+npm test          # or: pytest, go test ./..., cargo test, etc.
+
+# Linting
+npm run lint      # or: ruff check, golangci-lint run, etc.
+
+# Type checking
+npx tsc --noEmit  # or: mypy ., etc.
+
+# Build
+npm run build     # or: go build, cargo build, etc.
+```
+
+## Important Rules
+
+- Follow existing patterns in the codebase
+- Write tests for new functionality
+- Don't modify configuration files unless explicitly required
+- Keep changes minimal and focused

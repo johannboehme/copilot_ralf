@@ -1,0 +1,15 @@
+# Project-specific PRD and progress files (generated per-project)
+# Uncomment these if you don't want to track them:
+# prd.md
+# progress.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
