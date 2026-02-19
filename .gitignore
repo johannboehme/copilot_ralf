@@ -1,7 +1,11 @@
-# Project-specific PRD and progress files (generated per-project)
-# Uncomment these if you don't want to track them:
-# prd.md
-# progress.md
+# Ralph Loop state files (auto-generated, not for version control)
+.ralph/progress.md
+.ralph/failed-tasks.txt
+.ralph/config.env
+
+# Legacy locations (from v1)
+prd.md
+progress.md
 
 # OS
 .DS_Store

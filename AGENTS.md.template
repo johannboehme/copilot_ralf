@@ -19,6 +19,7 @@
 
 Run these after every change:
 
+<!-- ralph:verify:start -->
 ```bash
 # Tests
 npm test          # or: pytest, go test ./..., cargo test, etc.
@@ -32,6 +33,7 @@ npx tsc --noEmit  # or: mypy ., etc.
 # Build
 npm run build     # or: go build, cargo build, etc.
 ```
+<!-- ralph:verify:end -->
 
 ## Important Rules
 
@@ -39,3 +41,4 @@ npm run build     # or: go build, cargo build, etc.
 - Write tests for new functionality
 - Don't modify configuration files unless explicitly required
 - Keep changes minimal and focused
+- Use machine-verifiable acceptance criteria (e.g. "npm test passes", not "works correctly")
