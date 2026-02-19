@@ -95,32 +95,18 @@ count_done() {
     grep -c '^\- \[x\]' "${PRD_FILE}" 2>/dev/null || echo "0"
 }
 
-get_next_task_block() {
-    # Extract the first unchecked task block from the PRD
-    local in_task=false
-    local task_block=""
-
-    while IFS= read -r line; do
-        if [[ "${line}" =~ ^-\ \[\ \]\ \*\* ]]; then
-            in_task=true
-            task_block="${line}"
-        elif [[ "${in_task}" == true ]]; then
-            if [[ "${line}" =~ ^-\ \[ ]]; then
-                break
-            elif [[ "${line}" =~ ^[[:space:]] ]] || [[ -z "${line}" ]]; then
-                task_block="${task_block}
-${line}"
-            else
-                break
-            fi
-        fi
-    done < "${PRD_FILE}"
-
-    echo "${task_block}"
-}
-
-get_task_title() {
-    echo "$1" | head -1 | sed 's/^- \[ \] \*\*\(.*\)\*\*.*/\1/' | sed 's/\[effort:.*\]//' | xargs
+detect_completed_task() {
+    # Compare the PRD before/after to find which task was marked [x]
+    # Returns the title of the newly completed task, or "unknown task"
+    local prd_file="$1"
+    local newly_done
+    newly_done=$(git diff -- "${prd_file}" 2>/dev/null \
+        | grep '^+- \[x\]' \
+        | head -1 \
+        | sed 's/^+- \[x\] \*\*\(.*\)\*\*.*/\1/' \
+        | sed 's/\[effort:.*\]//' \
+        | xargs 2>/dev/null) || true
+    echo "${newly_done:-unknown task}"
 }
 
 snapshot_git_state() {
@@ -175,9 +161,9 @@ auto_commit() {
 }
 
 build_agent_prompt() {
-    local task_block="$1"
-    local iteration="$2"
-    local total_pending="$3"
+    local iteration="$1"
+    local pending="$2"
+    local done="$3"
 
     # Read AGENTS.md if it exists
     local agents_context=""
@@ -191,15 +177,9 @@ build_agent_prompt() {
         progress_context="$(tail -60 "${PROGRESS_FILE}")"
     fi
 
-    # Read current PRD state so agent can see what's done and what's next
-    local prd_context=""
-    if [[ -f "${PRD_FILE}" ]]; then
-        prd_context="$(cat "${PRD_FILE}")"
-    fi
-
     cat <<PROMPT
 You are an autonomous coding agent in a Ralph Loop (iteration ${iteration}).
-You must complete ONE task, verify it works, then signal completion.
+${done} tasks completed, ${pending} tasks remaining.
 
 ## Project Instructions
 ${agents_context:-No AGENTS.md found. Use your best judgment for project conventions.}
@@ -207,49 +187,47 @@ ${agents_context:-No AGENTS.md found. Use your best judgment for project convent
 ## Recent Progress
 ${progress_context:-No previous progress.}
 
-## Full Task List (PRD)
-${prd_context}
+## Your Mission
 
-## YOUR CURRENT TASK
-${task_block}
-
-## Instructions
-
-1. Read the relevant files to understand the current project state.
-2. Implement ONLY the current task described above — nothing else.
-3. Follow existing code conventions and patterns in the project.
-4. After implementing, run ALL verification commands you can find:
+1. Read prd.md to see the full task list.
+2. Study which tasks are already done [x] and which are still open [ ].
+3. **Choose the most important remaining task.** Consider:
+   - Dependencies: does this task unblock others?
+   - Foundation: does the project need this before other tasks can work?
+   - Priority: higher-listed tasks are generally higher priority.
+   - Context: what did previous iterations accomplish? What's the logical next step?
+4. Implement ONLY that one task. Keep changes minimal and focused.
+5. Follow existing code conventions and patterns in the project.
+6. After implementing, run ALL verification commands you can find:
    - Tests (npm test, pytest, go test, cargo test, etc.)
    - Linting (npm run lint, ruff, eslint, etc.)
    - Type checking (tsc --noEmit, mypy, etc.)
    - Build (npm run build, go build, cargo build, etc.)
    Check AGENTS.md for project-specific commands.
-5. If any verification fails, FIX the issues before continuing.
-6. Once everything passes, mark your task as done in prd.md:
-   Change the line from "- [ ]" to "- [x]" for YOUR task only.
+7. If any verification fails, FIX the issues before continuing.
+8. Once everything passes, mark your chosen task as done in prd.md:
+   Change its line from "- [ ]" to "- [x]".
 
 ## Completion Signal
 
 When (and ONLY when) you have:
-  a) Implemented the task
+  a) Chosen and implemented a task
   b) All verification commands pass (or no verification commands exist)
-  c) Marked the task as [x] in prd.md
+  c) Marked that task as [x] in prd.md
 
 Then output this exact string on its own line:
 <ralph>TASK_DONE</ralph>
 
-If you could NOT complete the task (blocker, unclear requirement, etc.),
-output this instead:
+If you could NOT complete any task (all remaining tasks are blocked), output:
 <ralph>TASK_BLOCKED</ralph>
 
 Do NOT output either signal until you are truly finished or truly blocked.
 
 ## Rules
 - Do NOT modify progress.md — the loop manages that file.
-- Do NOT work on other tasks — only the current one.
+- Work on exactly ONE task per iteration — not zero, not two.
 - Do NOT output the completion signal prematurely.
-- Keep changes minimal and focused.
-- There are ${total_pending} tasks remaining including this one.
+- Keep changes minimal and focused on the single chosen task.
 PROMPT
 }
 
@@ -314,30 +292,21 @@ while [[ ${iteration} -lt ${MAX_ITERATIONS} ]]; do
     fi
     last_pending="${PENDING}"
 
-    # Get the next task
-    TASK_BLOCK=$(get_next_task_block)
-    if [[ -z "${TASK_BLOCK}" ]]; then
-        echo -e "${GREEN}No more unchecked tasks found. Done!${NC}"
-        exit 0
-    fi
-
-    TASK_TITLE=$(get_task_title "${TASK_BLOCK}")
-
     echo -e "${CYAN}┌──────────────────────────────────────┐${NC}"
     echo -e "${CYAN}│ Iteration ${iteration}/${MAX_ITERATIONS} (${DONE} done, ${PENDING} pending)${NC}"
-    echo -e "${CYAN}│ Task: ${TASK_TITLE}${NC}"
+    echo -e "${CYAN}│ Agent will choose the next task${NC}"
     echo -e "${CYAN}└──────────────────────────────────────┘${NC}"
 
     if [[ "${DRY_RUN}" == true ]]; then
-        echo -e "${YELLOW}  [DRY RUN] Would send task to ${LOOP_MODEL}${NC}"
+        echo -e "${YELLOW}  [DRY RUN] Would send PRD to ${LOOP_MODEL}${NC}"
         continue
     fi
 
     # Snapshot git state before execution
     STATE_BEFORE=$(snapshot_git_state)
 
-    # Build the prompt
-    AGENT_PROMPT=$(build_agent_prompt "${TASK_BLOCK}" "${iteration}" "${PENDING}")
+    # Build the prompt — agent gets full PRD and chooses its own task
+    AGENT_PROMPT=$(build_agent_prompt "${iteration}" "${PENDING}" "${DONE}")
 
     # Execute via copilot_yolo with timeout
     echo -e "${GREEN}  Executing with ${LOOP_MODEL}...${NC}"
@@ -351,6 +320,9 @@ while [[ ${iteration} -lt ${MAX_ITERATIONS} ]]; do
     fi
 
     # ── Evaluate result using multiple signals ──
+
+    # Detect which task the agent completed (from PRD diff)
+    COMPLETED_TASK=$(detect_completed_task "${PRD_FILE}")
 
     # Signal 1: Did the agent output the promise string?
     PROMISE_DONE=false
@@ -386,7 +358,7 @@ while [[ ${iteration} -lt ${MAX_ITERATIONS} ]]; do
 
     if [[ "${TIMED_OUT}" == true ]]; then
         echo -e "${RED}  TIMEOUT: Task exceeded ${TASK_TIMEOUT}s limit${NC}"
-        log_progress "${iteration}" "${TASK_TITLE}" "timeout" "Exceeded ${TASK_TIMEOUT}s. Files changed: ${FILES_CHANGED}"
+        log_progress "${iteration}" "${COMPLETED_TASK}" "timeout" "Exceeded ${TASK_TIMEOUT}s. Files changed: ${FILES_CHANGED}"
         # Don't mark done — agent may have left things half-baked
         if [[ "${FILES_CHANGED}" == true ]]; then
             echo -e "${YELLOW}  Warning: Files were modified before timeout. Review manually.${NC}"
@@ -397,60 +369,48 @@ while [[ ${iteration} -lt ${MAX_ITERATIONS} ]]; do
         fi
 
     elif [[ "${PROMISE_BLOCKED}" == true ]]; then
-        echo -e "${RED}  BLOCKED: Agent reported it cannot complete this task${NC}"
-        log_progress "${iteration}" "${TASK_TITLE}" "blocked" "Agent self-reported blocker"
-        # Skip this task — mark done so the loop progresses
-        if [[ "${TASK_MARKED_DONE}" == false ]]; then
-            # Agent reported blocked but didn't mark it — we mark it to avoid infinite retry
-            if [[ "$(uname)" == "Darwin" ]]; then
-                sed -i '' '0,/^- \[ \]/s/^- \[ \]/- [~]/' "${PRD_FILE}"
-            else
-                sed -i '0,/^- \[ \]/s/^- \[ \]/- [~]/' "${PRD_FILE}"
-            fi
-            echo -e "${YELLOW}  Marked as [~] (blocked/skipped) in PRD${NC}"
-        fi
+        echo -e "${RED}  BLOCKED: Agent reported it cannot complete a task${NC}"
+        log_progress "${iteration}" "${COMPLETED_TASK}" "blocked" "Agent self-reported blocker"
+        # The agent should have marked the blocked task itself.
+        # If it didn't, the stagnation circuit breaker will eventually catch it.
 
     elif [[ "${PROMISE_DONE}" == true ]] && [[ "${TASK_MARKED_DONE}" == true ]]; then
         # Best case: agent said done AND marked it in the PRD
         echo -e "${GREEN}  VERIFIED: Task completed (promise + PRD marked)${NC}"
-        log_progress "${iteration}" "${TASK_TITLE}" "completed" "Verified: promise string + PRD checkbox"
-        auto_commit "${TASK_TITLE}"
+        log_progress "${iteration}" "${COMPLETED_TASK}" "completed" "Verified: promise string + PRD checkbox"
+        auto_commit "${COMPLETED_TASK}"
 
     elif [[ "${TASK_MARKED_DONE}" == true ]] && [[ "${PROMISE_DONE}" == false ]]; then
         # Agent marked PRD but didn't output promise — trust the PRD as primary signal
         echo -e "${GREEN}  COMPLETED: Task marked done in PRD (no promise string)${NC}"
-        log_progress "${iteration}" "${TASK_TITLE}" "completed" "PRD marked, no promise string"
-        auto_commit "${TASK_TITLE}"
+        log_progress "${iteration}" "${COMPLETED_TASK}" "completed" "PRD marked, no promise string"
+        auto_commit "${COMPLETED_TASK}"
 
     elif [[ "${PROMISE_DONE}" == true ]] && [[ "${TASK_MARKED_DONE}" == false ]]; then
-        # Agent said done but forgot to mark PRD — check if files changed
+        # Agent said done but forgot to mark PRD
         if [[ "${FILES_CHANGED}" == true ]]; then
             echo -e "${YELLOW}  PARTIAL: Agent claimed done but didn't mark PRD. Files changed.${NC}"
-            echo -e "${YELLOW}  Accepting based on promise + file changes. Marking PRD.${NC}"
-            if [[ "$(uname)" == "Darwin" ]]; then
-                sed -i '' '0,/^- \[ \]/s/^- \[ \]/- [x]/' "${PRD_FILE}"
-            else
-                sed -i '0,/^- \[ \]/s/^- \[ \]/- [x]/' "${PRD_FILE}"
-            fi
-            log_progress "${iteration}" "${TASK_TITLE}" "completed" "Promise string + file changes (PRD marked by loop)"
-            auto_commit "${TASK_TITLE}"
+            echo -e "${YELLOW}  Committing work. Next iteration should mark the PRD.${NC}"
+            log_progress "${iteration}" "${COMPLETED_TASK}" "partial" "Promise + file changes but PRD not marked"
+            auto_commit "${COMPLETED_TASK}"
+            # Don't try to guess which task to mark — let the next iteration handle it
         else
             echo -e "${YELLOW}  SUSPICIOUS: Agent claimed done but no file changes and no PRD mark${NC}"
-            log_progress "${iteration}" "${TASK_TITLE}" "suspicious" "Promise without evidence — retrying"
+            log_progress "${iteration}" "${COMPLETED_TASK}" "suspicious" "Promise without evidence — retrying"
         fi
 
     elif [[ "${FILES_CHANGED}" == true ]] && [[ "${PROMISE_DONE}" == false ]] && [[ "${TASK_MARKED_DONE}" == false ]]; then
         # Files changed but no completion signal — agent may have crashed mid-task
         echo -e "${YELLOW}  INCOMPLETE: Files changed but no completion signal${NC}"
         echo -e "${YELLOW}  Agent may have crashed or hit an error. Leaving for next iteration.${NC}"
-        log_progress "${iteration}" "${TASK_TITLE}" "incomplete" "Files changed, no completion signal — will retry"
+        log_progress "${iteration}" "${COMPLETED_TASK}" "incomplete" "Files changed, no completion signal — will retry"
         # Don't mark done, don't commit — let the next iteration see the partial work
         # and either finish or clean up
 
     else
         # No changes, no signals — agent did nothing
         echo -e "${YELLOW}  NO PROGRESS: No changes, no completion signal${NC}"
-        log_progress "${iteration}" "${TASK_TITLE}" "no-progress" "No file changes, no signals"
+        log_progress "${iteration}" "${COMPLETED_TASK}" "no-progress" "No file changes, no signals"
     fi
 
     echo ""
