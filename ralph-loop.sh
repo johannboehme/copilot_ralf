@@ -593,7 +593,6 @@ $(build_dynamic_prompt "${iteration}" "${PENDING}" "${DONE}" "${stagnant_count}"
     ERROR_TAIL=""
     if [[ "${PROMISE_DONE}" == false ]] && [[ "${TASK_MARKED_DONE}" == false ]]; then
         # Try to find error-relevant lines first (errors, failures, exceptions)
-        local error_lines
         error_lines=$(echo "${TASK_OUTPUT}" | grep -i -E '(error|fail|exception|panic|traceback|FAILED)' | tail -10 || true)
         if [[ -n "${error_lines}" ]]; then
             ERROR_TAIL="Key errors:
@@ -666,7 +665,6 @@ ${HC_OUTPUT}"
                 safe_commit "ralph: ${COMPLETED_TASK}" "${SKIP_HOOKS}"
             fi
             # Capture learnings from verified completion
-            local changed_files
             changed_files=$(git diff --name-only HEAD~1 HEAD 2>/dev/null | head -5 | tr '\n' ', ' || true)
             append_learning "${COMPLETED_TASK}" "${changed_files:-none}"
             last_error_context=""
@@ -694,7 +692,6 @@ ${HC_OUTPUT}"
                 safe_commit "ralph: ${COMPLETED_TASK}" "${SKIP_HOOKS}"
             fi
             # Capture learnings from completion
-            local changed_files
             changed_files=$(git diff --name-only HEAD~1 HEAD 2>/dev/null | head -5 | tr '\n' ', ' || true)
             append_learning "${COMPLETED_TASK}" "${changed_files:-none}"
             last_error_context=""

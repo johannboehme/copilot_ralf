@@ -401,6 +401,7 @@ start_output_peek() {
                 echo -e "  ${DIM}${s} Agent output:${NC}"
                 echo -e "    ${DIM}(waiting for output...)${NC}"
                 echo ""
+                echo ""
             fi
         done
     ) &
