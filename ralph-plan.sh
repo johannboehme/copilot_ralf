@@ -118,6 +118,15 @@ Write ONLY a Markdown file with this exact structure:
 
 ...continue for all tasks...
 
+## Global Acceptance Criteria
+
+These invariants must hold true after every task:
+- <Build command passes, e.g. "npm run build exits with code 0">
+- <Test command passes, e.g. "npm test exits with code 0">
+- No regressions in previously completed features
+
+Derive these from the tech stack — include the actual build, test, lint, and type-check commands for the project.
+
 ## Notes
 
 <Any important architectural decisions, constraints, or warnings>
@@ -152,6 +161,13 @@ if [[ ! -f "${RALPH_PRD}" ]]; then
         echo "${PLAN_OUTPUT}"
         exit 1
     fi
+fi
+
+# ── Insert Checkpoint Tasks ───────────────────────────────────────
+
+CHECKPOINT_INTERVAL="${RALPH_CHECKPOINT_INTERVAL:-4}"
+if [[ "${CHECKPOINT_INTERVAL}" -gt 0 ]]; then
+    insert_checkpoint_tasks "${RALPH_PRD}" "${CHECKPOINT_INTERVAL}"
 fi
 
 # ── Validate PRD ──────────────────────────────────────────────────

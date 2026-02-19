@@ -22,6 +22,9 @@ RALPH_SKIP_REVIEW="${RALPH_SKIP_REVIEW:-false}"
 RALPH_SKIP_HOOKS="${RALPH_SKIP_HOOKS:-false}"
 RALPH_TWO_PHASE="${RALPH_TWO_PHASE:-false}"
 RALPH_VERBOSE="${RALPH_VERBOSE:-false}"
+RALPH_HEALTHCHECK_ENABLED="${RALPH_HEALTHCHECK_ENABLED:-true}"
+RALPH_HEALTHCHECK_TIMEOUT="${RALPH_HEALTHCHECK_TIMEOUT:-120}"
+RALPH_CHECKPOINT_INTERVAL="${RALPH_CHECKPOINT_INTERVAL:-4}"
 
 # ── Usage ─────────────────────────────────────────────────────────
 
@@ -41,6 +44,9 @@ Options:
   --skip-hooks              Skip git pre-commit hooks
   --two-phase               Use two-phase execution (select + implement)
   --verbose                 Log prompts and outputs to .ralph/debug/
+  --no-healthcheck          Disable post-task healthcheck
+  --checkpoint-interval <n> Insert checkpoint tasks every N tasks (default: 4)
+  --no-checkpoints          Don't insert checkpoint tasks into PRD
   --plan-only               Only generate the PRD, don't execute
   --loop-only               Only run the loop (PRD must already exist)
   -h, --help                Show this help message
@@ -54,6 +60,9 @@ Environment variables:
   RALPH_SKIP_HOOKS          Skip pre-commit hooks (default: false)
   RALPH_TWO_PHASE           Two-phase execution (default: false)
   RALPH_VERBOSE             Log prompts/outputs to .ralph/debug/ (default: false)
+  RALPH_HEALTHCHECK_ENABLED Enable post-task healthcheck (default: true)
+  RALPH_HEALTHCHECK_TIMEOUT Healthcheck timeout in seconds (default: 120)
+  RALPH_CHECKPOINT_INTERVAL Insert checkpoint tasks every N tasks (default: 4)
 
 Examples:
   $0 "Build a CLI tool for managing TODO lists"
@@ -82,6 +91,9 @@ while [[ $# -gt 0 ]]; do
         --skip-hooks) RALPH_SKIP_HOOKS=true; shift ;;
         --two-phase) RALPH_TWO_PHASE=true; shift ;;
         --verbose) RALPH_VERBOSE=true; shift ;;
+        --no-healthcheck) RALPH_HEALTHCHECK_ENABLED=false; shift ;;
+        --checkpoint-interval) RALPH_CHECKPOINT_INTERVAL="$2"; shift 2 ;;
+        --no-checkpoints) RALPH_CHECKPOINT_INTERVAL=0; shift ;;
         --plan-only) PLAN_ONLY=true; shift ;;
         --loop-only) LOOP_ONLY=true; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -106,6 +118,9 @@ export RALPH_AUTO_COMMIT
 export RALPH_SKIP_HOOKS
 export RALPH_TWO_PHASE
 export RALPH_VERBOSE
+export RALPH_HEALTHCHECK_ENABLED
+export RALPH_HEALTHCHECK_TIMEOUT
+export RALPH_CHECKPOINT_INTERVAL
 
 init_ralph_dir "${RALPH_PROJECT_DIR}"
 
@@ -177,6 +192,7 @@ LOOP_ARGS=(-m "${RALPH_LOOP_MODEL}" -p "${RALPH_PROJECT_DIR}" -a "${RALPH_MAX_TA
 [[ "${RALPH_AUTO_COMMIT}" == false ]] && LOOP_ARGS+=(--no-commit)
 [[ "${RALPH_SKIP_HOOKS}" == true ]] && LOOP_ARGS+=(--skip-hooks)
 [[ "${RALPH_TWO_PHASE}" == true ]] && LOOP_ARGS+=(--two-phase)
+[[ "${RALPH_HEALTHCHECK_ENABLED}" == false ]] && LOOP_ARGS+=(--no-healthcheck)
 
 "${SCRIPT_DIR}/ralph-loop.sh" "${LOOP_ARGS[@]}"
 

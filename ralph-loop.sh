@@ -27,6 +27,8 @@ AUTO_COMMIT="${RALPH_AUTO_COMMIT:-true}"
 SKIP_HOOKS="${RALPH_SKIP_HOOKS:-false}"
 TWO_PHASE="${RALPH_TWO_PHASE:-false}"
 VERBOSE="${RALPH_VERBOSE:-false}"
+HEALTHCHECK_ENABLED="${RALPH_HEALTHCHECK_ENABLED:-true}"
+HEALTHCHECK_TIMEOUT="${RALPH_HEALTHCHECK_TIMEOUT:-120}"
 
 init_ralph_dir "${PROJECT_DIR}"
 
@@ -50,6 +52,7 @@ Options:
   --skip-hooks              Skip git pre-commit hooks on commits
   --two-phase               Use two-phase execution (select task, then implement)
   --verbose                 Log prompts and outputs to .ralph/debug/
+  --no-healthcheck          Disable post-task healthcheck
   --dry-run                 Show what would be done without executing
   -h, --help                Show this help message
 
@@ -63,6 +66,8 @@ Environment variables:
   RALPH_SKIP_HOOKS          Skip pre-commit hooks (default: false)
   RALPH_TWO_PHASE           Two-phase task execution (default: false)
   RALPH_VERBOSE             Log prompts/outputs to .ralph/debug/ (default: false)
+  RALPH_HEALTHCHECK_ENABLED Enable post-task healthcheck (default: true)
+  RALPH_HEALTHCHECK_TIMEOUT Healthcheck timeout in seconds (default: 120)
 EOF
 }
 
@@ -84,6 +89,7 @@ while [[ $# -gt 0 ]]; do
         --skip-hooks) SKIP_HOOKS=true; shift ;;
         --two-phase) TWO_PHASE=true; shift ;;
         --verbose) VERBOSE=true; shift ;;
+        --no-healthcheck) HEALTHCHECK_ENABLED=false; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
         -h|--help) usage; exit 0 ;;
         -*) error "Unknown option: $1"; usage; exit 1 ;;
@@ -139,6 +145,7 @@ build_static_prompt() {
   - Build (npm run build, go build, cargo build, etc.)
   - Check AGENTS.md for project-specific commands.
 - If verification fails, FIX the issues before continuing.
+- After completing a task, verify ALL global acceptance criteria still hold.
 - Once done, mark the task as [x] in prd.md.
 - Do NOT modify progress.md — the loop manages that file.
 - Do NOT output the completion signal prematurely.
@@ -162,6 +169,17 @@ STATIC
         echo "## Project Instructions"
         echo ""
         echo "${agents_context}"
+    fi
+
+    # Extract global acceptance criteria from PRD
+    if [[ -f "${RALPH_PRD}" ]]; then
+        local gac=""
+        gac=$(sed -n '/^## Global Acceptance Criteria/,/^## /{ /^## Global Acceptance Criteria/d; /^## /d; p; }' "${RALPH_PRD}" 2>/dev/null || true)
+        if [[ -n "${gac}" ]]; then
+            echo ""
+            echo "## Global Acceptance Criteria"
+            echo "${gac}"
+        fi
     fi
 }
 
@@ -216,6 +234,14 @@ DYNAMIC
             echo "attempting and choose a DIFFERENT task from the PRD. If all tasks seem blocked,"
             echo "output <ralph>TASK_BLOCKED</ralph>."
         fi
+    fi
+
+    # Healthcheck failure hint
+    if [[ -n "${last_error}" ]] && [[ "${last_error}" == *"Healthcheck failed"* ]]; then
+        echo ""
+        echo "## IMPORTANT: Healthcheck Failure"
+        echo "The last task broke system-level health. Before working on a new task, fix the"
+        echo "regression first. Run the verification commands to identify the failure."
     fi
 
     # Last error context
@@ -296,7 +322,7 @@ echo -e "${BLUE}╚════════════════════�
 echo ""
 echo -e "  ${YELLOW}Model:${NC} ${LOOP_MODEL}  ${DIM}|${NC}  ${YELLOW}Escalation:${NC} ${PLAN_MODEL}"
 echo -e "  ${YELLOW}Limits:${NC} ${MAX_TASK_ATTEMPTS} attempts/task, ${MAX_STAGNANT} stagnant, $(format_duration "${TASK_TIMEOUT}")/task"
-echo -e "  ${YELLOW}Options:${NC} commit=${AUTO_COMMIT} two-phase=${TWO_PHASE} verbose=${VERBOSE}"
+echo -e "  ${YELLOW}Options:${NC} commit=${AUTO_COMMIT} two-phase=${TWO_PHASE} verbose=${VERBOSE} healthcheck=${HEALTHCHECK_ENABLED}"
 echo ""
 print_progress_bar "${INITIAL_DONE}" "${INITIAL_TOTAL}"
 echo ""
@@ -402,12 +428,11 @@ while true; do
     esac
 
     TOTAL_TASKS=$((DONE + PENDING + $(count_blocked)))
-    ELAPSED=$(($(date +%s) - LOOP_START_TIME))
     NEXT_TASK=$(get_next_pending_task)
 
     print_dashboard "${iteration}" "${CURRENT_MODEL}" \
         "${stagnant_count}" "${DONE}" "${TOTAL_TASKS}" \
-        "${NEXT_TASK}" "${ELAPSED}" "${EFFECTIVE_TIMEOUT}"
+        "${NEXT_TASK}"
 
     if [[ "${DRY_RUN}" == true ]]; then
         warn "  [DRY RUN] Would send PRD to ${CURRENT_MODEL}"
@@ -462,7 +487,7 @@ $(build_dynamic_prompt "${iteration}" "${PENDING}" "${DONE}" "${stagnant_count}"
     TASK_OUTPUT_FILE=$(ralph_mktemp)
     export RALPH_OUTPUT_FILE="${TASK_OUTPUT_FILE}"
 
-    start_output_peek "${TASK_OUTPUT_FILE}"
+    start_output_peek "${TASK_OUTPUT_FILE}" "${ITER_START}" "${EFFECTIVE_TIMEOUT}" "${LOOP_START_TIME}"
 
     if [[ "${EFFECTIVE_TIMEOUT}" -gt 0 ]]; then
         run_copilot_yolo_with_timeout "${EFFECTIVE_TIMEOUT}" --model "${CURRENT_MODEL}" --no-pull -p "${AGENT_PROMPT}" || TASK_EXIT=$?
@@ -561,6 +586,19 @@ $(build_dynamic_prompt "${iteration}" "${PENDING}" "${DONE}" "${stagnant_count}"
             safe_commit "ralph: ${COMPLETED_TASK}" "${SKIP_HOOKS}"
         fi
         last_error_context=""
+        # Post-task healthcheck
+        if [[ "${HEALTHCHECK_ENABLED}" == true ]]; then
+            HC_OUTPUT=""
+            if ! HC_OUTPUT=$(run_healthcheck "${PROJECT_DIR}" "${HEALTHCHECK_TIMEOUT}"); then
+                print_verdict "healthcheck-failed" "${COMPLETED_TASK}" "${ITER_DURATION}" \
+                    "task completed but healthcheck failed"
+                log_progress "${iteration}" "${COMPLETED_TASK}" "healthcheck-failed" \
+                    "Healthcheck failed after task completion" "${HC_OUTPUT}" "${ITER_DURATION}"
+                last_error_context="Healthcheck failed after completing '${COMPLETED_TASK}':
+${HC_OUTPUT}"
+                stagnant_count=$((stagnant_count + 1))
+            fi
+        fi
 
     elif [[ "${TASK_MARKED_DONE}" == true ]] && [[ "${PROMISE_DONE}" == false ]]; then
         print_verdict "completed" "${COMPLETED_TASK}" "${ITER_DURATION}" \
@@ -571,6 +609,19 @@ $(build_dynamic_prompt "${iteration}" "${PENDING}" "${DONE}" "${stagnant_count}"
             safe_commit "ralph: ${COMPLETED_TASK}" "${SKIP_HOOKS}"
         fi
         last_error_context=""
+        # Post-task healthcheck
+        if [[ "${HEALTHCHECK_ENABLED}" == true ]]; then
+            HC_OUTPUT=""
+            if ! HC_OUTPUT=$(run_healthcheck "${PROJECT_DIR}" "${HEALTHCHECK_TIMEOUT}"); then
+                print_verdict "healthcheck-failed" "${COMPLETED_TASK}" "${ITER_DURATION}" \
+                    "task completed but healthcheck failed"
+                log_progress "${iteration}" "${COMPLETED_TASK}" "healthcheck-failed" \
+                    "Healthcheck failed after task completion" "${HC_OUTPUT}" "${ITER_DURATION}"
+                last_error_context="Healthcheck failed after completing '${COMPLETED_TASK}':
+${HC_OUTPUT}"
+                stagnant_count=$((stagnant_count + 1))
+            fi
+        fi
 
     elif [[ "${PROMISE_DONE}" == true ]] && [[ "${TASK_MARKED_DONE}" == false ]]; then
         if [[ "${FILES_CHANGED}" == true ]]; then

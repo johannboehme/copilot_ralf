@@ -247,8 +247,6 @@ print_dashboard() {
     local done="$4"
     local total="$5"
     local task_name="$6"
-    local elapsed="$7"
-    local timeout="$8"
 
     local escalated=""
     if [[ "${model}" != "${LOOP_MODEL:-}" ]] && [[ "${stagnant_count}" -gt 0 ]]; then
@@ -268,7 +266,6 @@ print_dashboard() {
     if [[ -n "${task_name}" ]]; then
         echo -e "${CYAN}│${NC} Task: ${BOLD}${task_name}${NC}"
     fi
-    echo -e "${CYAN}│${NC} Elapsed: $(format_duration "${elapsed}")  |  Timeout: $(format_duration "${timeout}")"
     echo -e "${CYAN}└─────────────────────────────────────────────────────────┘${NC}"
 }
 
@@ -296,6 +293,8 @@ print_verdict() {
             icon="◐" color="${YELLOW}" label="INCOMPLETE" ;;
         no-progress)
             icon="✗" color="${RED}" label="NO PROGRESS" ;;
+        healthcheck-failed)
+            icon="⚠" color="${YELLOW}" label="HEALTHCHECK FAILED" ;;
         *)
             icon="?" color="${DIM}" label="${verdict}" ;;
     esac
@@ -312,51 +311,94 @@ RALPH_PEEK_PID=""
 
 start_output_peek() {
     local output_file="$1"
+    local iter_start="${2:-}"
+    local task_timeout="${3:-}"
+    local loop_start="${4:-}"
 
     # Only in interactive terminals with color support
     if [[ "${RALPH_INTERACTIVE}" != true ]] || [[ "${RALPH_COLOR}" != true ]]; then
         return
     fi
 
+    # Number of lines in the live block (elapsed + header + 3 output lines)
+    # Line 1: elapsed/timeout status
+    # Line 2: spinner + "Agent output:"
+    # Lines 3-5: last 3 output lines
+    RALPH_PEEK_LINES=5
+
     # Spinner chars
     (
         local spin_chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
         local spin_idx=0
         local prev_lines=""
+        local tick=0
         while true; do
-            sleep 0.5
-            if [[ ! -f "${output_file}" ]]; then
-                continue
-            fi
-
-            # Get last 3 non-empty lines, strip ANSI
-            local lines
-            lines=$(sed $'s/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\x1b\]0;[^\x07]*\x07//g' "${output_file}" 2>/dev/null \
-                | grep -v '^$' | tail -3 2>/dev/null) || true
-
-            if [[ -z "${lines}" ]] || [[ "${lines}" == "${prev_lines}" ]]; then
-                continue
-            fi
-            prev_lines="${lines}"
+            sleep 1
+            tick=$((tick + 1))
 
             local s="${spin_chars:spin_idx:1}"
             spin_idx=$(( (spin_idx + 1) % ${#spin_chars} ))
 
-            # Move up and clear previous peek (3 lines + header)
-            printf '\033[4A\033[J' 2>/dev/null || true
-            echo -e "  ${DIM}${s} Agent output:${NC}"
-            while IFS= read -r line; do
-                # Truncate long lines
-                if [[ ${#line} -gt 70 ]]; then
-                    line="${line:0:67}..."
+            # Build elapsed line
+            local elapsed_line=""
+            if [[ -n "${iter_start}" ]] && [[ -n "${task_timeout}" ]]; then
+                local now
+                now=$(date +%s)
+                local task_elapsed=$((now - iter_start))
+                local total_display=""
+                if [[ -n "${loop_start}" ]]; then
+                    local total_elapsed=$((now - loop_start))
+                    total_display="  |  Total: $(format_duration "${total_elapsed}")"
                 fi
-                echo -e "    ${DIM}${line}${NC}"
-            done <<< "${lines}"
+                elapsed_line="  ${s} $(format_duration "${task_elapsed}") / $(format_duration "${task_timeout}")${total_display}"
+            fi
+
+            # Get last 3 non-empty lines from output, strip ANSI
+            local lines=""
+            if [[ -f "${output_file}" ]]; then
+                lines=$(sed $'s/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\x1b\]0;[^\x07]*\x07//g' "${output_file}" 2>/dev/null \
+                    | grep -v '^$' | tail -3 2>/dev/null) || true
+            fi
+
+            # Always redraw (elapsed changes every tick)
+            # Move up and clear previous block
+            printf "\033[${RALPH_PEEK_LINES}A\033[J" 2>/dev/null || true
+
+            # Line 1: elapsed
+            if [[ -n "${elapsed_line}" ]]; then
+                echo -e "${elapsed_line}"
+            else
+                echo ""
+            fi
+
+            # Lines 2-5: agent output
+            if [[ -n "${lines}" ]]; then
+                echo -e "  ${DIM}${s} Agent output:${NC}"
+                while IFS= read -r line; do
+                    if [[ ${#line} -gt 70 ]]; then
+                        line="${line:0:67}..."
+                    fi
+                    echo -e "    ${DIM}${line}${NC}"
+                done <<< "${lines}"
+                # Pad to 3 output lines
+                local line_count
+                line_count=$(echo "${lines}" | wc -l | tr -d ' ')
+                local pad=$((3 - line_count))
+                while [[ ${pad} -gt 0 ]]; do
+                    echo ""
+                    pad=$((pad - 1))
+                done
+            else
+                echo -e "  ${DIM}${s} Agent output:${NC}"
+                echo -e "    ${DIM}(waiting for output...)${NC}"
+                echo ""
+            fi
         done
     ) &
     RALPH_PEEK_PID=$!
 
     # Print placeholder lines that the peek loop will overwrite
+    echo -e "  ⠋ 0m 0s / $(format_duration "${task_timeout}")"
     echo -e "  ${DIM}⠋ Agent output:${NC}"
     echo -e "    ${DIM}(waiting for output...)${NC}"
     echo ""
@@ -370,7 +412,7 @@ stop_output_peek() {
         RALPH_PEEK_PID=""
         # Clear peek lines
         if [[ "${RALPH_INTERACTIVE}" == true ]] && [[ "${RALPH_COLOR}" == true ]]; then
-            printf '\033[4A\033[J' 2>/dev/null || true
+            printf "\033[${RALPH_PEEK_LINES:-5}A\033[J" 2>/dev/null || true
         fi
     fi
 }
@@ -778,6 +820,150 @@ auto_block_task() {
     fi
 
     log_progress "—" "${title}" "auto-blocked" "Exceeded max attempts"
+}
+
+# ── Healthcheck ──────────────────────────────────────────────────
+
+parse_verify_commands() {
+    local agents_file="$1"
+    if [[ ! -f "${agents_file}" ]]; then
+        return
+    fi
+
+    # Extract commands between ralph:verify:start and ralph:verify:end markers
+    local in_block=false
+    local in_code=false
+    while IFS= read -r line; do
+        if [[ "${line}" == *"ralph:verify:start"* ]]; then
+            in_block=true
+            continue
+        fi
+        if [[ "${line}" == *"ralph:verify:end"* ]]; then
+            break
+        fi
+        if [[ "${in_block}" == true ]]; then
+            # Skip code fence markers
+            if [[ "${line}" =~ ^\`\`\` ]]; then
+                in_code=$([ "${in_code}" == true ] && echo false || echo true)
+                continue
+            fi
+            # Skip empty lines and comments
+            if [[ -z "${line}" ]] || [[ "${line}" =~ ^[[:space:]]*# ]]; then
+                continue
+            fi
+            # Trim leading whitespace and emit
+            echo "${line}" | sed 's/^[[:space:]]*//'
+        fi
+    done < "${agents_file}"
+}
+
+run_healthcheck() {
+    local project_dir="$1"
+    local timeout_secs="${2:-120}"
+    local agents_file="${project_dir}/AGENTS.md"
+
+    # Extract verify commands
+    local commands
+    commands=$(parse_verify_commands "${agents_file}")
+
+    # No verify block — silently pass (graceful degradation)
+    if [[ -z "${commands}" ]]; then
+        return 0
+    fi
+
+    local healthcheck_output=""
+    local failed=false
+
+    while IFS= read -r cmd; do
+        # Run each command with a timeout using the portable pattern
+        local cmd_output=""
+        local cmd_exit=0
+
+        cmd_output=$(cd "${project_dir}" && eval "${cmd}" 2>&1) || cmd_exit=$?
+
+        # Check timeout via background watchdog pattern
+        if [[ ${cmd_exit} -ne 0 ]]; then
+            healthcheck_output+="FAILED: ${cmd}
+${cmd_output}
+"
+            failed=true
+        fi
+    done <<< "${commands}"
+
+    if [[ "${failed}" == true ]]; then
+        echo "${healthcheck_output}"
+        return 1
+    fi
+
+    return 0
+}
+
+# ── Checkpoint Tasks ─────────────────────────────────────────────
+
+insert_checkpoint_tasks() {
+    local prd_file="$1"
+    local interval="${2:-4}"
+
+    # Interval of 0 means no checkpoints
+    if [[ "${interval}" -eq 0 ]]; then
+        return 0
+    fi
+
+    if [[ ! -f "${prd_file}" ]]; then
+        return 0
+    fi
+
+    # Count total pending tasks
+    local total_tasks
+    total_tasks=$(grep -c '^\- \[ \]' "${prd_file}" 2>/dev/null || echo "0")
+
+    # Small projects don't need checkpoints
+    if [[ "${total_tasks}" -le "${interval}" ]]; then
+        return 0
+    fi
+
+    local tmp
+    tmp=$(ralph_mktemp)
+    local task_count=0
+    local checkpoint_num=0
+    local last_checkpoint_at=0
+
+    while IFS= read -r line; do
+        # Detect task headers
+        if [[ "${line}" =~ ^-\ \[\ \]\ \*\* ]]; then
+            task_count=$((task_count + 1))
+
+            # Insert checkpoint before this task if we've hit the interval
+            if [[ $((task_count - last_checkpoint_at - 1)) -ge ${interval} ]]; then
+                checkpoint_num=$((checkpoint_num + 1))
+                last_checkpoint_at=$((task_count - 1))
+                cat >> "${tmp}" <<CKPT
+
+- [ ] **Checkpoint ${checkpoint_num}: Integration Verification** [effort: low]
+  - Description: Run full build and test suite. Verify all previously completed features still work. Fix any regressions found before proceeding.
+  - Files: (none - verification and regression fixing only)
+  - Acceptance: All existing tests pass, application builds successfully, no regressions in completed features
+
+CKPT
+            fi
+        fi
+        echo "${line}" >> "${tmp}"
+    done < "${prd_file}"
+
+    # Add final checkpoint if there are remaining tasks after the last checkpoint
+    local remaining=$((task_count - last_checkpoint_at))
+    if [[ ${remaining} -gt 0 ]] && [[ ${checkpoint_num} -gt 0 || ${task_count} -gt ${interval} ]]; then
+        checkpoint_num=$((checkpoint_num + 1))
+        cat >> "${tmp}" <<CKPT
+
+- [ ] **Checkpoint ${checkpoint_num}: Final Integration Verification** [effort: low]
+  - Description: Run full build and test suite. Verify all previously completed features still work. Fix any regressions found before proceeding.
+  - Files: (none - verification and regression fixing only)
+  - Acceptance: All existing tests pass, application builds successfully, no regressions in completed features
+CKPT
+    fi
+
+    mv "${tmp}" "${prd_file}"
 }
 
 # ── Pre-flight Checks ────────────────────────────────────────────

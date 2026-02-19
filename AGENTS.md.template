@@ -17,7 +17,7 @@
 
 ## Verification Commands
 
-Run these after every change:
+Run these after every change. Also used as the automatic healthcheck between iterations:
 
 <!-- ralph:verify:start -->
 ```bash
