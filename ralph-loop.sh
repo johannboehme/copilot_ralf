@@ -10,7 +10,7 @@
 #   Layer 5: Circuit breaker with adaptive recovery on stagnation
 #   Layer 6: Execution timeout per task prevents infinite hangs
 
-set -euo pipefail
+set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/ralph-lib.sh"
@@ -95,7 +95,8 @@ if [[ ! -f "${RALPH_PRD}" ]]; then
     exit 1
 fi
 
-if ! command -v copilot_yolo &>/dev/null; then
+_ralph_load_copilot
+if ! type copilot_yolo &>/dev/null; then
     error "copilot_yolo is not installed."
     echo "Install from: https://github.com/GordonBeeming/copilot_here"
     exit 1
@@ -382,7 +383,7 @@ while [[ ${iteration} -lt ${MAX_ITERATIONS} ]]; do
         SELECT_PROMPT=$(build_task_selection_prompt "${PENDING}" "${DONE}")
 
         SELECTED_TASK=""
-        SELECTED_TASK=$(timeout 120 copilot_yolo --model "${CURRENT_MODEL}" --no-pull -p "${SELECT_PROMPT}" 2>&1) || true
+        SELECTED_TASK=$(run_copilot_yolo_with_timeout 120 --model "${CURRENT_MODEL}" --no-pull -p "${SELECT_PROMPT}" 2>&1) || true
         SELECTED_TASK=$(echo "${SELECTED_TASK}" | grep '^TASK:' | head -1 | sed 's/^TASK: *//')
 
         if [[ -z "${SELECTED_TASK}" ]]; then
@@ -403,14 +404,17 @@ $(build_dynamic_prompt "${iteration}" "${PENDING}" "${DONE}" "${stagnant_count}"
 $(build_dynamic_prompt "${iteration}" "${PENDING}" "${DONE}" "${stagnant_count}" "${last_error_context}")"
     fi
 
-    # Execute via copilot_yolo with timeout
+    # Execute via copilot_yolo
     success "  Executing with ${CURRENT_MODEL}..."
 
+    TASK_OUTPUT_FILE=$(mktemp)
     if [[ "${TASK_TIMEOUT}" -gt 0 ]]; then
-        TASK_OUTPUT=$(timeout "${TASK_TIMEOUT}" copilot_yolo --model "${CURRENT_MODEL}" --no-pull -p "${AGENT_PROMPT}" 2>&1) || TASK_EXIT=$?
+        run_copilot_yolo_with_timeout "${TASK_TIMEOUT}" --model "${CURRENT_MODEL}" --no-pull -p "${AGENT_PROMPT}" > "${TASK_OUTPUT_FILE}" 2>&1 || TASK_EXIT=$?
     else
-        TASK_OUTPUT=$(copilot_yolo --model "${CURRENT_MODEL}" --no-pull -p "${AGENT_PROMPT}" 2>&1) || TASK_EXIT=$?
+        run_copilot_yolo --model "${CURRENT_MODEL}" --no-pull -p "${AGENT_PROMPT}" > "${TASK_OUTPUT_FILE}" 2>&1 || TASK_EXIT=$?
     fi
+    TASK_OUTPUT=$(cat "${TASK_OUTPUT_FILE}" 2>/dev/null)
+    rm -f "${TASK_OUTPUT_FILE}"
 
     ITER_END=$(date +%s)
     ITER_DURATION=$((ITER_END - ITER_START))

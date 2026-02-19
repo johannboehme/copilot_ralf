@@ -2,6 +2,95 @@
 # ralph-lib.sh — Shared library for the Ralph Loop
 # Source this file from other ralph scripts: source "$(dirname "$0")/ralph-lib.sh"
 
+# ── Load copilot_here shell functions if not already available ────
+# copilot_here.sh uses unbound variables internally, so we must ensure
+# nounset is off both when sourcing and when calling its functions.
+
+_ralph_load_copilot() {
+    if ! type copilot_yolo &>/dev/null 2>&1; then
+        if [[ -f "${HOME}/.copilot_here.sh" ]]; then
+            source "${HOME}/.copilot_here.sh"
+        fi
+    fi
+}
+
+# Wrapper that calls copilot_yolo, ensuring a PTY is available
+# (copilot_yolo runs Docker which requires a TTY)
+run_copilot_yolo() {
+    _ralph_load_copilot
+
+    # If we already have a TTY, call directly
+    if [[ -t 0 ]]; then
+        copilot_yolo "$@"
+        return $?
+    fi
+
+    # No TTY available — use 'script' to allocate a PTY
+    local argfile outfile
+    argfile=$(mktemp)
+    outfile=$(mktemp)
+
+    {
+        echo '#!/usr/bin/env bash'
+        echo 'source ~/.copilot_here.sh 2>/dev/null'
+        printf 'copilot_yolo'
+        for arg in "$@"; do
+            printf ' %q' "$arg"
+        done
+        echo ''
+    } > "${argfile}"
+    chmod +x "${argfile}"
+
+    # Run synchronously with script for PTY allocation
+    script -q "${outfile}" bash "${argfile}" >/dev/null 2>&1
+    local exit_code=$?
+
+    # Output result (strip ANSI escapes and carriage returns)
+    sed $'s/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\x1b\]0;[^\x07]*\x07//g' "${outfile}" | tr -d '\r'
+
+    rm -f "${argfile}" "${outfile}"
+    return ${exit_code}
+}
+
+# Portable timeout for copilot_yolo (macOS doesn't have GNU timeout)
+# Usage: run_copilot_yolo_with_timeout <seconds> [copilot_yolo args...]
+# Returns 124 on timeout (matching GNU timeout behavior)
+run_copilot_yolo_with_timeout() {
+    local timeout_secs="$1"
+    shift
+
+    # Run in background with watchdog
+    local outfile
+    outfile=$(mktemp)
+
+    run_copilot_yolo "$@" > "${outfile}" 2>&1 &
+    local cmd_pid=$!
+
+    # Watchdog: kill after timeout
+    (
+        sleep "${timeout_secs}" 2>/dev/null
+        kill "${cmd_pid}" 2>/dev/null
+    ) &
+    local watchdog_pid=$!
+
+    wait "${cmd_pid}" 2>/dev/null
+    local exit_code=$?
+
+    # Clean up watchdog
+    kill "${watchdog_pid}" 2>/dev/null 2>&1
+    wait "${watchdog_pid}" 2>/dev/null 2>&1
+
+    # Output captured result
+    cat "${outfile}" 2>/dev/null
+    rm -f "${outfile}"
+
+    # If killed by signal, return 124 (timeout)
+    if [[ ${exit_code} -ge 137 ]]; then
+        return 124
+    fi
+    return ${exit_code}
+}
+
 # ── Colors ────────────────────────────────────────────────────────
 
 RED='\033[0;31m'
@@ -132,15 +221,21 @@ safe_revert() {
 # ── PRD Parsing ───────────────────────────────────────────────────
 
 count_pending() {
-    grep -c '^\- \[ \]' "${RALPH_PRD}" 2>/dev/null || echo "0"
+    local n
+    n=$(grep -c '^\- \[ \]' "${RALPH_PRD}" 2>/dev/null) || true
+    echo "${n:-0}"
 }
 
 count_done() {
-    grep -c '^\- \[x\]' "${RALPH_PRD}" 2>/dev/null || echo "0"
+    local n
+    n=$(grep -c '^\- \[x\]' "${RALPH_PRD}" 2>/dev/null) || true
+    echo "${n:-0}"
 }
 
 count_blocked() {
-    grep -c '^\- \[\~\]' "${RALPH_PRD}" 2>/dev/null || echo "0"
+    local n
+    n=$(grep -c '^\- \[\~\]' "${RALPH_PRD}" 2>/dev/null) || true
+    echo "${n:-0}"
 }
 
 detect_completed_task() {
@@ -340,7 +435,9 @@ get_failed_task_count() {
         echo "0"
         return
     fi
-    grep -cv '^#' "${RALPH_FAILED}" 2>/dev/null || echo "0"
+    local n
+    n=$(grep -cv '^#' "${RALPH_FAILED}" 2>/dev/null) || true
+    echo "${n:-0}"
 }
 
 # ── Pre-flight Checks ────────────────────────────────────────────
@@ -364,7 +461,8 @@ preflight_check() {
     fi
 
     # 3. copilot_yolo available
-    if ! command -v copilot_yolo &>/dev/null; then
+    _ralph_load_copilot
+    if ! type copilot_yolo &>/dev/null; then
         error "  copilot_yolo not found. Install: https://github.com/GordonBeeming/copilot_here"
         errors=$((errors + 1))
     fi

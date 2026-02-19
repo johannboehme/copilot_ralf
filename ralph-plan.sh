@@ -5,7 +5,7 @@
 # Uses a smart model (default: claude-sonnet-4.5) via copilot_yolo to decompose
 # the prompt into atomic, actionable tasks in Markdown format.
 
-set -euo pipefail
+set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/ralph-lib.sh"
@@ -59,7 +59,8 @@ if [[ -z "${PROMPT}" ]]; then
 fi
 
 # Check prerequisites
-if ! command -v copilot_yolo &>/dev/null; then
+_ralph_load_copilot
+if ! type copilot_yolo &>/dev/null; then
     error "copilot_yolo is not installed."
     echo "Install from: https://github.com/GordonBeeming/copilot_here"
     exit 1
@@ -131,7 +132,7 @@ success "Generating PRD with ${PLAN_MODEL}..."
 echo ""
 
 # Run copilot_yolo to generate the PRD
-PLAN_OUTPUT=$(copilot_yolo --model "${PLAN_MODEL}" --no-pull -p "Read the current project structure and files if any exist, then based on that context, generate a PRD file. Write the PRD directly to the file '${RALPH_PRD}'. Here is the planning prompt:
+PLAN_OUTPUT=$(run_copilot_yolo --model "${PLAN_MODEL}" --no-pull -p "Read the current project structure and files if any exist, then based on that context, generate a PRD file. Write the PRD directly to the file '${RALPH_PRD}'. Here is the planning prompt:
 
 ${FULL_PROMPT}" 2>&1) || {
     error "Planning failed."

@@ -7,7 +7,7 @@
 # 2. Lets you review/edit the PRD
 # 3. Runs the Ralph Loop with a cheap model to complete all tasks
 
-set -euo pipefail
+set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/ralph-lib.sh"
